@@ -414,6 +414,14 @@ pub struct Parameters {
     #[arg(long = "alignMatesGapMax", default_value_t = 0)]
     pub align_mates_gap_max: u32,
 
+    /// Min mapped length of spliced mates (absolute, default 0 = off)
+    #[arg(long = "alignSplicedMateMapLmin", default_value_t = 0)]
+    pub align_spliced_mate_map_lmin: u32,
+
+    /// Min mapped length of spliced mates as fraction of read length (default 0.66)
+    #[arg(long = "alignSplicedMateMapLminOverLmate", default_value_t = 0.66)]
+    pub align_spliced_mate_map_lmin_over_lmate: f64,
+
     /// Min overhang for novel spliced alignments
     #[arg(long = "alignSJoverhangMin", default_value_t = 5)]
     pub align_sj_overhang_min: u32,
@@ -627,6 +635,57 @@ impl Parameters {
     /// Used for max_cluster_dist and as default alignIntronMax (when 0).
     pub fn win_bin_window_dist(&self) -> u64 {
         (1u64 << self.win_bin_nbits) * self.win_anchor_dist_nbins as u64
+    }
+
+    /// Redefine window parameters based on genome size and intron/gap limits.
+    /// Ports STAR's Genome_genomeLoad.cpp logic that recomputes winBinNbits,
+    /// winFlankNbins, and winAnchorDistNbins after loading the genome.
+    ///
+    /// IMPORTANT: winBinNbits is only redefined when alignIntronMax > 0 OR
+    /// alignMatesGapMax > 0. When both are 0, winBinNbits stays at its default (16).
+    pub fn redefine_window_params(&mut self, n_genome: u64) {
+        let intron_max = self.align_intron_max as u64;
+        let gap_max = self.align_mates_gap_max as u64;
+
+        if intron_max == 0 && gap_max == 0 {
+            // STAR: no redefinition when both are 0. Log effective max intron.
+            let max_intron = (1u64 << self.win_bin_nbits) * self.win_anchor_dist_nbins as u64;
+            log::info!(
+                "alignIntronMax=alignMatesGapMax=0, max intron ~= (2^winBinNbits)*winAnchorDistNbins={}",
+                max_intron
+            );
+            return;
+        }
+
+        // STAR: max(max(4, alignIntronMax), alignMatesGapMax==0 ? 1000 : alignMatesGapMax)
+        let max_span = std::cmp::max(
+            std::cmp::max(4u64, intron_max),
+            if gap_max == 0 { 1000 } else { gap_max },
+        );
+
+        // winBinNbits = floor(log2(max_span / 4) + 0.5)
+        self.win_bin_nbits = ((max_span as f64 / 4.0).log2() + 0.5).floor() as u32;
+
+        // max with genome-based value: floor(log2(nGenome/40000 + 1) + 0.5)
+        let genome_based = ((n_genome as f64 / 40000.0 + 1.0).log2() + 0.5).floor() as u32;
+        self.win_bin_nbits = self.win_bin_nbits.max(genome_based);
+
+        // Cap at genomeChrBinNbits
+        if self.win_bin_nbits > self.genome_chr_bin_nbits {
+            self.win_bin_nbits = self.genome_chr_bin_nbits;
+        }
+
+        // Redefine winFlankNbins and winAnchorDistNbins
+        let max_gap = std::cmp::max(intron_max, gap_max);
+        self.win_flank_nbins = (max_gap / (1u64 << self.win_bin_nbits) + 1) as u32;
+        self.win_anchor_dist_nbins = 2 * self.win_flank_nbins;
+
+        log::info!(
+            "Redefined window params: winBinNbits={}, winFlankNbins={}, winAnchorDistNbins={}",
+            self.win_bin_nbits,
+            self.win_flank_nbins,
+            self.win_anchor_dist_nbins
+        );
     }
 
     /// Validate parameter combinations that clap alone cannot enforce.

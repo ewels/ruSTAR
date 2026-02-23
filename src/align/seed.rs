@@ -64,21 +64,22 @@ impl Seed {
             }
         }
 
-        // Search R→L: reverse-complement the read and run L→R search on it
+        // Search R→L: SPARSE search matching STAR's seedSearchStartLmax-based Nstart formula.
+        // STAR divides the RC read into Nstart=ceil(readLen/seedSearchStartLmax) evenly-spaced
+        // starting positions, advancing by MMP length (Lmapped) from each start.
+        // This matches STAR's ReadAlign_Seeds.cpp R→L search behavior and avoids creating
+        // false splice anchors from rare short-match seeds near read ends.
         let rc_read = reverse_complement_read(read_seq);
-        for rc_pos in 0..rc_read.len() {
-            let result =
-                find_seed_at_position(&rc_read, rc_pos, index, min_seed_length, false, params)?;
-            if let Some(mut seed) = result.seed {
-                // Convert RC read position back to original read coordinates
-                seed.read_pos = read_len - rc_pos - seed.length;
-                seed.search_rc = true;
-                seeds.push(seed);
-                if seeds.len() >= params.seed_per_read_nmax {
-                    break;
-                }
-            }
-        }
+        search_direction_sparse(
+            &rc_read,
+            read_len,
+            index,
+            min_seed_length,
+            params,
+            params.seed_search_start_lmax,
+            true,
+            &mut seeds,
+        )?;
 
         Ok(seeds)
     }
@@ -185,11 +186,9 @@ struct MmpResult {
 /// Produces ~20-40 seeds per 150bp read (vs ~100+ with dense every-position search)
 /// while guaranteeing no gap > seedMapMin (default 5bp).
 ///
-/// NOTE: Bug-fixed but dormant — our DP stitcher needs dense (every-position) seeds.
-/// Sparse seeds cause false splices (4.3% vs 2.2%) because mismatch-position seeds
-/// map to spurious locations without enough neighboring seeds to vote them down.
-/// Activate when DP is adapted for sparse seeds (extension-based gap filling).
-#[allow(dead_code)]
+/// Now active for R→L direction (keeping L→R dense). This matches STAR's behavior:
+/// dense L→R seeds for DP stitching, sparse R→L seeds to avoid false splice anchors
+/// near read ends caused by rare short matches.
 fn search_direction_sparse(
     read_seq: &[u8],
     original_read_len: usize,

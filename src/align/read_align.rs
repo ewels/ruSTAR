@@ -79,8 +79,8 @@ pub fn align_read(
     let debug_read = !params.read_name_filter.is_empty() && read_name == params.read_name_filter;
 
     // Step 1: Find seeds
-    // Use a reasonable default min seed length (typically 8-20bp)
-    let min_seed_length = 8;
+    // STAR uses seedMapMin (default 5) as minimum seed length
+    let min_seed_length = params.seed_map_min;
     let seeds = Seed::find_seeds(read_seq, index, min_seed_length, params)?;
 
     if debug_read {
@@ -92,20 +92,14 @@ pub fn align_read(
             total_positions,
             read_seq.len()
         );
-        for (i, seed) in seeds.iter().enumerate().take(20) {
-            eprintln!(
-                "  seed[{}]: read_pos={}, length={}, sa_range=[{},{}), n_positions={}",
-                i,
-                seed.read_pos,
-                seed.length,
-                seed.sa_start,
-                seed.sa_end,
-                seed.sa_end - seed.sa_start
-            );
-        }
-        if seeds.len() > 20 {
-            eprintln!("  ... ({} more seeds)", seeds.len() - 20);
-        }
+        let n_lr = seeds.iter().filter(|s| !s.search_rc).count();
+        let n_rl = seeds.iter().filter(|s| s.search_rc).count();
+        eprintln!(
+            "  {} seeds total: {} L→R (dense), {} R→L (sparse)",
+            seeds.len(),
+            n_lr,
+            n_rl
+        );
     }
 
     if seeds.is_empty() {
@@ -128,6 +122,7 @@ pub fn align_read(
         max_loci_for_anchor,
         params.win_anchor_multimap_nmax,
         params.seed_per_window_nmax,
+        min_seed_length,
     );
 
     if debug_read {
@@ -136,24 +131,20 @@ pub fn align_read(
             read_name,
             clusters.len()
         );
-        for (i, cluster) in clusters.iter().enumerate().take(10) {
+        for (i, cluster) in clusters.iter().take(10).enumerate() {
             let chr_name = if cluster.chr_idx < index.genome.chr_name.len() {
                 &index.genome.chr_name[cluster.chr_idx]
             } else {
                 "unknown"
             };
             eprintln!(
-                "  cluster[{}]: chr={} (idx={}), is_reverse={}, seeds={}, anchor_bin={}",
+                "  cluster[{}]: chr={}, is_reverse={}, seeds={}, anchor_bin={}",
                 i,
                 chr_name,
-                cluster.chr_idx,
                 cluster.is_reverse,
                 cluster.alignments.len(),
                 cluster.anchor_bin,
             );
-        }
-        if clusters.len() > 10 {
-            eprintln!("  ... ({} more clusters)", clusters.len() - 10);
         }
     }
 
@@ -596,6 +587,7 @@ fn rescue_unmapped_mate(
 
     // Step 5: Cluster and stitch the filtered seeds (bin-based windowing)
     let max_loci_for_anchor = params.win_anchor_multimap_nmax;
+    let min_seed_length = params.seed_map_min;
     let clusters = cluster_seeds(
         &filtered_seeds,
         unmapped_seq,
@@ -606,6 +598,7 @@ fn rescue_unmapped_mate(
         max_loci_for_anchor,
         params.win_anchor_multimap_nmax,
         params.seed_per_window_nmax,
+        min_seed_length,
     );
 
     if clusters.is_empty() {

@@ -42,6 +42,10 @@ pub struct AlignmentScorer {
     pub score_genomic_length_log2_scale: f64,
     /// Max score reduction for SJ stitching shift (scoreStitchSJshift, default 1)
     pub score_stitch_sj_shift: i32,
+    /// Min mapped length of spliced mates (absolute, default 0)
+    pub align_spliced_mate_map_lmin: u32,
+    /// Min mapped length of spliced mates as fraction of read length (default 0.66)
+    pub align_spliced_mate_map_lmin_over_lmate: f64,
 }
 
 impl AlignmentScorer {
@@ -66,6 +70,8 @@ impl AlignmentScorer {
             align_intron_max: 589_824,
             score_genomic_length_log2_scale: -0.25,
             score_stitch_sj_shift: 1,
+            align_spliced_mate_map_lmin: 0,
+            align_spliced_mate_map_lmin_over_lmate: 0.66,
         }
     }
 
@@ -99,6 +105,8 @@ impl AlignmentScorer {
             },
             score_genomic_length_log2_scale: params.score_genomic_length_log2_scale,
             score_stitch_sj_shift: params.score_stitch_sj_shift,
+            align_spliced_mate_map_lmin: params.align_spliced_mate_map_lmin,
+            align_spliced_mate_map_lmin_over_lmate: params.align_spliced_mate_map_lmin_over_lmate,
         }
     }
 
@@ -269,7 +277,7 @@ impl AlignmentScorer {
         is_reverse: bool,
         n_genome: u64,
         prev_exon_len: usize,
-    ) -> (i32, SpliceMotif, i32) {
+    ) -> (i32, SpliceMotif, i32, u32, u32) {
         let del = g_gap - r_gap; // net intron/deletion length (constant)
         debug_assert!(del > 0);
 
@@ -387,6 +395,7 @@ impl AlignmentScorer {
 
         // Phase 3: Repeat detection around best_jr + left-flush for non-canonical/deletion
         // Count matching bases between donor and acceptor sides around best_jr
+        // STAR: jjL = left repeat, jjR = right repeat
         let mut jj_l: i32 = 0;
         loop {
             let left_pos = g_a_end_inc as i64 + best_jr as i64 - jj_l as i64;
@@ -407,9 +416,32 @@ impl AlignmentScorer {
             }
         }
 
+        // Right repeat: count matching bases going right from junction
+        let mut jj_r: i32 = 0;
+        loop {
+            let left_pos = g_a_end_inc as i64 + jj_r as i64 + best_jr as i64 + 1;
+            let right_pos = g_b_start1 + jj_r as i64 + best_jr as i64 + 1;
+            if left_pos < 0 || right_pos < 0 {
+                break;
+            }
+            let g_left = genome.get_base(left_pos as u64 + genome_offset);
+            let g_right = genome.get_base(right_pos as u64 + genome_offset);
+            match (g_left, g_right) {
+                (Some(gl), Some(gr)) if gl < 4 && gl == gr => {
+                    jj_r += 1;
+                }
+                _ => break,
+            }
+            if jj_r > 100 {
+                break;
+            }
+        }
+
         // Non-canonical or deletion: flush LEFT to be deterministic in repeat regions
         if best_motif == SpliceMotif::NonCanonical || del < self.align_intron_min as i64 {
             best_jr -= jj_l;
+            jj_r += jj_l;
+            jj_l = 0;
             // Clamp: don't shift beyond available flanking Matches
             best_jr = best_jr.max(-(prev_exon_len as i32)).min(r_gap as i32);
             // Re-check motif at flushed position
@@ -425,7 +457,13 @@ impl AlignmentScorer {
             }
         }
 
-        (best_jr, best_motif, best_motif_score)
+        (
+            best_jr,
+            best_motif,
+            best_motif_score,
+            jj_l.max(0) as u32,
+            jj_r.max(0) as u32,
+        )
     }
 
     /// Detect splice junction motif
@@ -632,6 +670,8 @@ mod tests {
             align_intron_max: 589_824,
             score_genomic_length_log2_scale: -0.25,
             score_stitch_sj_shift: 1,
+            align_spliced_mate_map_lmin: 0,
+            align_spliced_mate_map_lmin_over_lmate: 0.66,
         };
 
         // Intron from position 2, length 12 (spans positions 2-13 inclusive)
@@ -673,6 +713,8 @@ mod tests {
             align_intron_max: 589_824,
             score_genomic_length_log2_scale: -0.25,
             score_stitch_sj_shift: 1,
+            align_spliced_mate_map_lmin: 0,
+            align_spliced_mate_map_lmin_over_lmate: 0.66,
         };
 
         let motif = scorer.detect_splice_motif(2, 12, &genome);
@@ -713,6 +755,8 @@ mod tests {
             align_intron_max: 589_824,
             score_genomic_length_log2_scale: -0.25,
             score_stitch_sj_shift: 1,
+            align_spliced_mate_map_lmin: 0,
+            align_spliced_mate_map_lmin_over_lmate: 0.66,
         };
 
         let motif = scorer.detect_splice_motif(2, 12, &genome);
@@ -751,6 +795,8 @@ mod tests {
             align_intron_max: 589_824,
             score_genomic_length_log2_scale: -0.25,
             score_stitch_sj_shift: 1,
+            align_spliced_mate_map_lmin: 0,
+            align_spliced_mate_map_lmin_over_lmate: 0.66,
         };
 
         let motif = scorer.detect_splice_motif(2, 12, &genome);
@@ -782,6 +828,8 @@ mod tests {
             align_intron_max: 589_824,
             score_genomic_length_log2_scale: -0.25,
             score_stitch_sj_shift: 1,
+            align_spliced_mate_map_lmin: 0,
+            align_spliced_mate_map_lmin_over_lmate: 0.66,
         };
 
         let (score, gap_type) = scorer.score_gap(0, 5, 0, &genome);
@@ -811,6 +859,8 @@ mod tests {
             align_intron_max: 589_824,
             score_genomic_length_log2_scale: -0.25,
             score_stitch_sj_shift: 1,
+            align_spliced_mate_map_lmin: 0,
+            align_spliced_mate_map_lmin_over_lmate: 0.66,
         };
 
         // Small gap (< align_intron_min) is deletion
@@ -848,6 +898,8 @@ mod tests {
             align_intron_max: 589_824,
             score_genomic_length_log2_scale: -0.25,
             score_stitch_sj_shift: 1,
+            align_spliced_mate_map_lmin: 0,
+            align_spliced_mate_map_lmin_over_lmate: 0.66,
         };
 
         // Gap starting at position 2 (GT), length 26 (>= 21) is splice junction
@@ -883,6 +935,8 @@ mod tests {
             align_intron_max: 589_824,
             score_genomic_length_log2_scale: -0.25,
             score_stitch_sj_shift: 1,
+            align_spliced_mate_map_lmin: 0,
+            align_spliced_mate_map_lmin_over_lmate: 0.66,
         };
 
         // Annotated junction should get bonus
@@ -922,6 +976,8 @@ mod tests {
             align_intron_max: 589_824,
             score_genomic_length_log2_scale: -0.25,
             score_stitch_sj_shift: 1,
+            align_spliced_mate_map_lmin: 0,
+            align_spliced_mate_map_lmin_over_lmate: 0.66,
         };
 
         // CT-AC motif: (1,3,0,1) — reverse complement of GT-AG
@@ -1022,6 +1078,8 @@ mod tests {
             align_intron_max: 589_824,
             score_genomic_length_log2_scale: -0.25,
             score_stitch_sj_shift: 1,
+            align_spliced_mate_map_lmin: 0,
+            align_spliced_mate_map_lmin_over_lmate: 0.66,
         };
 
         // Gap of exactly 589824 starting at position 100 should be splice junction
@@ -1098,6 +1156,8 @@ mod tests {
             align_intron_max: 1000, // Small max for testing
             score_genomic_length_log2_scale: -0.25,
             score_stitch_sj_shift: 1,
+            align_spliced_mate_map_lmin: 0,
+            align_spliced_mate_map_lmin_over_lmate: 0.66,
         };
 
         // Gap of 1001 (> 1000 max) should be deletion, not splice junction
@@ -1146,6 +1206,8 @@ mod tests {
             align_intron_max: 589_824,
             score_genomic_length_log2_scale: -0.25,
             score_stitch_sj_shift: 1,
+            align_spliced_mate_map_lmin: 0,
+            align_spliced_mate_map_lmin_over_lmate: 0.66,
         }
     }
 
@@ -1209,7 +1271,7 @@ mod tests {
         // Read[5] = A matches upstream but not downstream → score1 += 1 for jR=1
         let read_seq = vec![0, 1, 2, 3, 0, 0, 0, 1]; // ACGTAACG...
 
-        let (jr_shift, motif, _motif_score) = scorer.find_best_junction_position(
+        let (jr_shift, motif, _motif_score, _, _) = scorer.find_best_junction_position(
             &read_seq,
             5,  // r_a_end (exclusive)
             5,  // g_a_end (exclusive)
@@ -1252,7 +1314,7 @@ mod tests {
         // Read gap = 0, genome gap = 24 (pure splice junction)
         let read_seq = vec![0, 1, 2, 3, 0, 0, 1]; // ACGTAAC
 
-        let (jr_shift, motif, _motif_score) = scorer.find_best_junction_position(
+        let (jr_shift, motif, _motif_score, _, _) = scorer.find_best_junction_position(
             &read_seq,
             5,  // r_a_end (exclusive)
             5,  // g_a_end (exclusive)
@@ -1302,7 +1364,7 @@ mod tests {
         // read_gap = 0
         let read_seq = vec![0, 1, 2, 3, 1, 1, 1]; // the gap base
 
-        let (jr_shift, motif, _) = scorer.find_best_junction_position(
+        let (jr_shift, motif, _, _, _) = scorer.find_best_junction_position(
             &read_seq,
             5,  // r_a_end
             5,  // g_a_end

@@ -128,17 +128,21 @@ fn align_reads(params: &Parameters) -> anyhow::Result<()> {
         index.genome.n_chr_real, index.genome.n_genome
     );
 
+    // Redefine window parameters based on genome size (STAR's Genome_genomeLoad.cpp)
+    let mut params = params.clone();
+    params.redefine_window_params(index.genome.n_genome);
+
     let time_map_start = chrono::Local::now();
 
     // 2. Dispatch based on two-pass mode
     let stats = match params.twopass_mode {
         TwopassMode::None => {
             info!("Running single-pass alignment");
-            run_single_pass(&index, params)?
+            run_single_pass(&index, &params)?
         }
         TwopassMode::Basic => {
             info!("Running two-pass alignment mode");
-            run_two_pass(&index, params)?
+            run_two_pass(&index, &params)?
         }
     };
 
