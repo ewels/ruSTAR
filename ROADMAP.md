@@ -180,17 +180,17 @@ See [docs/phase15_sam_tags.md](docs/phase15_sam_tags.md) for detailed sub-phase 
 
 See [docs/phase16_algorithm.md](docs/phase16_algorithm.md) for sub-phase notes (16.1-16.13), [docs/phase16_14_nstart_fix.md](docs/phase16_14_nstart_fix.md) for the Nstart fix.
 
-**Summary**: Bin-based windowing, pre-DP seed extension, MMP SA range narrowing, multi-transcript DP, recursive combinatorial stitcher, STAR-faithful scoring (scoreStitchSJshift removed), sparse bidirectional seed search with Nstart fix (99.3% pos adjusted, 2.1% splice, 99.1% MAPQ agree), mate rescue.
+**Summary**: Bin-based windowing, pre-DP seed extension, MMP SA range narrowing, multi-transcript DP, recursive combinatorial stitcher, STAR-faithful scoring (scoreStitchSJshift removed), sparse bidirectional seed search with Nstart fix, WALrec persistent threshold, post-jR shared base scoring, hierarchical SAindex lookup, nWA reset + overlap detection (99.4% pos adjusted, 98.8% CIGAR, 2.1% splice, 99.5% MAPQ agree), mate rescue.
 
-**Remaining disagreements (10k SE yeast, 157 total):**
+**Remaining disagreements (10k SE yeast, 148 total):**
 
 | Root Cause | Count | Status |
 |-----------|-------|--------|
-| False splices — tiny trailing exons (6-12bp) | 22 | Phase 16.15 planned |
-| Repeat region tie-breaking (rDNA multi-mapper) | 119 | Unavoidable |
-| Missed splices (STAR finds, ruSTAR doesn't) | 26 | Investigation needed |
-| MAPQ inflation (ruSTAR=255, STAR=multi) | 42 | Related to multi-loci discovery |
-| Mapping-only differences (one maps, other doesn't) | 55 | Investigation needed |
+| Diff-chr multi-mapper ties | 96 | Unavoidable (random seed) |
+| Same-chr repeat tie-breaking | 9 | Unavoidable |
+| Missed splices (STAR finds, ruSTAR doesn't) | ~15 | Investigation needed |
+| MAPQ inflation (ruSTAR=255, STAR=multi) | 38 | Related to multi-loci discovery |
+| Mapping-only differences (one maps, other doesn't) | ~59 | Investigation needed |
 
 ---
 

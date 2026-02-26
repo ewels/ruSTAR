@@ -32,7 +32,7 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Status
 
-**264 tests passing, 0 clippy warnings.** SE: 99.4% position agreement (adjusted), 98.8% CIGAR, 2.0% splice rate (STAR: 2.2%), 64 shared junctions, 99.5% MAPQ agreement. See [ROADMAP.md](ROADMAP.md) for detailed phase tracking and [docs/](docs/) for per-phase notes.
+**269 tests passing, 0 clippy warnings.** SE: 99.4% position agreement (adjusted), 98.8% CIGAR, 2.1% splice rate (STAR: 2.2%), 64 shared junctions, 99.5% MAPQ agreement. See [ROADMAP.md](ROADMAP.md) for detailed phase tracking and [docs/](docs/) for per-phase notes.
 
 ## Source Layout
 
@@ -55,7 +55,7 @@ src/
     io.rs          -- Load index from disk (Genome, SA, SAindex)
   align/
     mod.rs         -- Module definition
-    seed.rs        -- Seed finding via MMP search + binary search on SA
+    seed.rs        -- Seed finding via hierarchical SAindex lookup + MMP search
     stitch.rs      -- Seed clustering + DP stitching + alignment extension (extendAlign)
     score.rs       -- Scoring functions (gaps, mismatches, splice junctions)
     transcript.rs  -- Transcript struct (exon coords, CIGAR, scores)
@@ -128,17 +128,17 @@ predicates = "3"
 - Every phase uses differential testing against STAR where applicable
 - Test data tiers: synthetic micro-genome → chr22 → full human genome
 
-**Current test status**: 264/264 tests passing (260 unit + 4 integration), 0 clippy warnings
+**Current test status**: 269/269 tests passing (265 unit + 4 integration), 0 clippy warnings
 
 ## Known Issues — Disagreement Root Causes (10k SE yeast)
 
-157 total position disagreements, 5 root causes identified:
+148 total position disagreements, 5 root causes identified:
 
-1. **False splices — tiny trailing exons (22 reads)** — ruSTAR creates 6-12bp terminal exons after large introns (e.g., `143M583925N7M`) where STAR soft-clips instead (`144M6S`). **Top priority fix.**
-2. **Repeat region tie-breaking (119 reads)** — Same CIGAR/MAPQ, different positions in repeat copies (rDNA at distances 3652/37968/99850bp). 96 diff-chr multi ties + 23 same-chr. **Unavoidable** without matching STAR's random seed.
-3. **Missed splices (26 reads)** — STAR finds spliced alignment, ruSTAR doesn't. Often short first exon (5-22bp) + large intron. Flip side of seed search coverage.
-4. **MAPQ inflation (42 reads)** — ruSTAR=255 (unique) when STAR sees multiple loci. 8 diff-chr + 34 pos-agree. Missing multi-mapping locations.
-5. **Mapping-only differences (55 reads)** — 29 STAR-only + 26 ruSTAR-only mapped.
+1. **Diff-chr multi-mapper ties (96 reads)** — Same CIGAR/MAPQ, different positions in repeat copies (rDNA). **Unavoidable** without matching STAR's random seed.
+2. **MAPQ inflation (38 reads)** — ruSTAR=255 (unique) when STAR sees multiple loci. Missing multi-mapping locations.
+3. **Missed splices (~15 reads)** — STAR finds spliced alignment, ruSTAR doesn't. Often short first exon (5-22bp) + large intron.
+4. **Mapping-only differences (~59 reads)** — 32 STAR-only + 27 ruSTAR-only mapped.
+5. **Same-chr position differences (~9 reads)** — Different alignment choices at repeat regions or spliced vs unspliced.
 
 See [ROADMAP.md](ROADMAP.md) and [docs/](docs/) for full issue tracking.
 

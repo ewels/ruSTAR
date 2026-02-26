@@ -143,6 +143,76 @@ impl SaIndex {
         })
     }
 
+    /// Hierarchical SAindex lookup (STAR's maxMappableLength2strands approach).
+    ///
+    /// Starts with full k-mer at level min(k, nbases), progressively shortens
+    /// until a present entry is found. Returns narrowed SA range + matched level.
+    ///
+    /// Returns: Some((sa_start, sa_end_exclusive, matched_level, bounds_tight))
+    ///   - sa_start: first SA index in range
+    ///   - sa_end_exclusive: past-the-end SA index
+    ///   - matched_level: how many bases the SAindex resolved
+    ///   - bounds_tight: both bounds came from present SAindex entries
+    ///     (safe to skip first matched_level bases in binary search)
+    ///
+    /// Returns None if no prefix exists in the index (all levels absent).
+    pub fn hierarchical_lookup(
+        &self,
+        kmer_idx: u64,
+        k: u32,
+        n_sa: usize,
+    ) -> Option<(usize, usize, usize, bool)> {
+        let mut lind = k.min(self.nbases);
+        let mut ind = kmer_idx;
+
+        // If k > nbases, truncate to nbases by removing trailing bases
+        if k > self.nbases {
+            ind >>= 2 * (k - self.nbases);
+        }
+
+        // Walk down levels until we find a present entry
+        while lind > 0 {
+            let sai_pos = self.genome_sa_index_start[(lind - 1) as usize] + ind;
+            if sai_pos >= self.data.len() as u64 {
+                lind -= 1;
+                ind >>= 2;
+                continue;
+            }
+
+            let entry = self.data.read(sai_pos as usize);
+            let is_absent = (entry >> (self.gstrand_bit + 2)) & 1 != 0;
+
+            if !is_absent {
+                // Found present entry — extract SA position
+                let sa_pos_mask = (1u64 << self.gstrand_bit) - 1;
+                let sa_start = (entry & sa_pos_mask) as usize;
+
+                // Get upper bound from next k-mer at same level
+                let level_end = self.genome_sa_index_start[lind as usize];
+                let next_pos = self.genome_sa_index_start[(lind - 1) as usize] + ind + 1;
+
+                let (sa_end, bounds_tight) = if next_pos < level_end {
+                    let next_entry = self.data.read(next_pos as usize);
+                    let next_absent = (next_entry >> (self.gstrand_bit + 2)) & 1 != 0;
+                    if !next_absent {
+                        ((next_entry & sa_pos_mask) as usize, true)
+                    } else {
+                        (n_sa, false)
+                    }
+                } else {
+                    (n_sa, false)
+                };
+
+                return Some((sa_start, sa_end, lind as usize, bounds_tight));
+            }
+
+            lind -= 1;
+            ind >>= 2;
+        }
+
+        None
+    }
+
     /// Get SA range for a k-mer lookup.
     ///
     /// Returns (start_sa_index, is_present) where is_present indicates
@@ -181,6 +251,11 @@ mod tests {
     use tempfile::NamedTempFile;
 
     fn make_test_index(sequence: &str, bin_nbits: u32, sa_nbases: u32) -> SaIndex {
+        let (sai, _) = make_test_index_with_sa(sequence, bin_nbits, sa_nbases);
+        sai
+    }
+
+    fn make_test_index_with_sa(sequence: &str, bin_nbits: u32, sa_nbases: u32) -> (SaIndex, usize) {
         let mut file = NamedTempFile::new().unwrap();
         writeln!(file, ">test").unwrap();
         writeln!(file, "{}", sequence).unwrap();
@@ -202,7 +277,9 @@ mod tests {
         let params = Parameters::parse_from(args);
         let genome = Genome::from_fasta(&params).unwrap();
         let sa = SuffixArray::build(&genome).unwrap();
-        SaIndex::build(&genome, &sa, sa_nbases).unwrap()
+        let sa_len = sa.len();
+        let sai = SaIndex::build(&genome, &sa, sa_nbases).unwrap();
+        (sai, sa_len)
     }
 
     #[test]
@@ -263,5 +340,98 @@ mod tests {
         assert_eq!(sai.genome_sa_index_start[2], 20); // 4 + 4^2
         assert_eq!(sai.genome_sa_index_start[3], 84); // 4 + 16 + 4^3
         assert_eq!(sai.genome_sa_index_start[4], 340); // 4 + 16 + 64 + 4^4
+    }
+
+    #[test]
+    fn hierarchical_lookup_full_kmer_present() {
+        // Genome "AAAA" with sa_nbases=2: 2-mer "AA" (idx=0) should be present
+        let (sai, n_sa) = make_test_index_with_sa("AAAA", 2, 2);
+        let kmer_idx = 0b00_00; // AA
+
+        let result = sai.hierarchical_lookup(kmer_idx, 2, n_sa);
+        assert!(result.is_some(), "AA should be found in AAAA");
+
+        let (sa_start, sa_end, matched_level, _bounds_tight) = result.unwrap();
+        assert_eq!(matched_level, 2, "Should match at full level 2");
+        assert!(sa_start < sa_end, "SA range should be non-empty");
+    }
+
+    #[test]
+    fn hierarchical_lookup_fallback_to_shorter() {
+        // Genome "ACAC" with sa_nbases=2.
+        // Forward: A,C,A,C. RC: GTGT → G,T,G,T.
+        // 2-mers present: AC(01), CA(10) from forward; GT(23), TG(32) from RC.
+        // 2-mer "AT" (idx=0b00_11=3) is absent.
+        // But 1-mer "A" (idx=0) is present.
+        let (sai, n_sa) = make_test_index_with_sa("ACAC", 2, 2);
+        let kmer_idx = 0b00_11; // AT
+
+        let result = sai.hierarchical_lookup(kmer_idx, 2, n_sa);
+        assert!(result.is_some(), "Should fall back to 1-mer 'A'");
+
+        let (sa_start, sa_end, matched_level, _bounds_tight) = result.unwrap();
+        assert_eq!(matched_level, 1, "Should match at level 1 (1-mer 'A')");
+        assert!(sa_start < sa_end, "SA range should be non-empty");
+    }
+
+    #[test]
+    fn hierarchical_lookup_no_prefix_exists() {
+        // Genome "AAAA" → forward: AAAA, RC: TTTT
+        // Only 1-mers A(0) and T(3) present. C(1) and G(2) absent at all levels.
+        let (sai, n_sa) = make_test_index_with_sa("AAAA", 2, 2);
+        let kmer_idx = 0b10; // G (1-mer)
+
+        let result = sai.hierarchical_lookup(kmer_idx, 1, n_sa);
+        assert!(result.is_none(), "G should not be found in AAAA genome");
+    }
+
+    #[test]
+    fn hierarchical_lookup_tight_vs_nontight() {
+        // Genome "ACGTACGT" with sa_nbases=2: many 2-mers present
+        // AC(01), CG(12), GT(23) and their RC: AC(01), CG(12), GT(23)
+        // Also from RC read: CA? TG? etc.
+        // "AC" (idx=0b00_01=1) is present. Next 2-mer "AG" (idx=0b00_10=2)?
+        // If "AG" is present → tight bounds. If absent → not tight.
+        let (sai, n_sa) = make_test_index_with_sa("ACGTACGT", 2, 2);
+        let kmer_idx_ac = 0b00_01; // AC
+
+        let result = sai.hierarchical_lookup(kmer_idx_ac, 2, n_sa);
+        assert!(result.is_some());
+
+        let (sa_start, sa_end, matched_level, bounds_tight) = result.unwrap();
+        assert_eq!(matched_level, 2);
+        assert!(sa_start < sa_end);
+
+        // Verify consistency: tight bounds means sa_end came from a present entry
+        if bounds_tight {
+            // sa_end should be a valid SA index (not n_sa)
+            assert!(sa_end <= n_sa);
+        }
+    }
+
+    #[test]
+    fn hierarchical_lookup_matches_lookup_when_present() {
+        // When full k-mer is present, hierarchical_lookup should give the same
+        // sa_start as lookup()
+        let (sai, n_sa) = make_test_index_with_sa("ACGTACGT", 2, 2);
+
+        for kmer_idx in 0..16u64 {
+            let (old_sa_pos, old_present) = sai.lookup(kmer_idx, 2);
+            let new_result = sai.hierarchical_lookup(kmer_idx, 2, n_sa);
+
+            if old_present {
+                let (new_sa_start, _, matched_level, _) = new_result.unwrap();
+                assert_eq!(
+                    new_sa_start, old_sa_pos as usize,
+                    "SA start should match for k-mer {}",
+                    kmer_idx
+                );
+                assert_eq!(
+                    matched_level, 2,
+                    "Should match at full level for k-mer {}",
+                    kmer_idx
+                );
+            }
+        }
     }
 }

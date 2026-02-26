@@ -304,52 +304,59 @@ fn find_seed_at_position(
         });
     }
 
-    // Use SAindex to get initial SA range
+    // Build k-mer for SAindex lookup, stopping at first N base
     let lookup_len = remaining.min(sa_nbases);
     let mut kmer_idx = 0u64;
-    let mut has_n = false;
+    let mut actual_len = 0usize;
 
     for i in 0..lookup_len {
         let base = read_seq[read_pos + i];
         if base >= 4 {
-            has_n = true;
-            break;
+            break; // N base — stop building k-mer
         }
         kmer_idx = (kmer_idx << 2) | (base as u64);
+        actual_len = i + 1;
     }
 
-    if has_n {
+    if actual_len == 0 {
         return Ok(MmpResult {
             seed: None,
             advance: 1,
-        }); // N base — no match possible
+        }); // First base is N
     }
 
-    // Look up in SAindex
-    let (sa_pos, is_present) = index.sa_index.lookup(kmer_idx, lookup_len as u32);
+    // Hierarchical SAindex lookup (STAR's maxMappableLength2strands approach).
+    // Starts at full k-mer level and progressively shortens until a present
+    // entry is found. This lets us find seeds even when the full k-mer is
+    // absent (e.g., short exon straddling a splice junction).
+    let n_sa = index.suffix_array.len();
+    let result = index
+        .sa_index
+        .hierarchical_lookup(kmer_idx, actual_len as u32, n_sa);
 
-    if !is_present {
-        return Ok(MmpResult {
-            seed: None,
-            advance: 1,
-        }); // K-mer not in index
-    }
-
-    // Binary search to find exact range
-    let (sa_start, sa_end) =
-        binary_search_sa(read_seq, read_pos, index, sa_pos as usize, lookup_len)?;
+    let (sa_start, sa_end, matched_level, bounds_tight) = match result {
+        Some(r) => r,
+        None => {
+            return Ok(MmpResult {
+                seed: None,
+                advance: 1,
+            });
+        }
+    };
 
     if sa_start >= sa_end {
         return Ok(MmpResult {
             seed: None,
             advance: 1,
-        }); // SA range empty
+        });
     }
 
     // Find maximum mappable prefix length and narrow SA range (STAR's maxMappableLength).
-    // Binary searches within the SA range, extending match while narrowing both boundaries.
+    // When bounds are tight (both from present SAindex entries), we can skip
+    // comparing the first matched_level bases since all entries share that prefix.
+    let l_initial = if bounds_tight { matched_level } else { 0 };
     let (match_length, narrowed_start, narrowed_end) =
-        max_mappable_length(read_seq, read_pos, index, sa_start, sa_end, lookup_len);
+        max_mappable_length(read_seq, read_pos, index, sa_start, sa_end, l_initial);
     let advance = match_length.max(1);
 
     // Check seedMultimapNmax: filter seeds that map to too many loci
@@ -382,98 +389,6 @@ fn find_seed_at_position(
             advance,
         })
     }
-}
-
-/// Binary search the SA around a starting position to find exact range.
-fn binary_search_sa(
-    read_seq: &[u8],
-    read_pos: usize,
-    index: &GenomeIndex,
-    _hint_pos: usize,
-    min_match: usize,
-) -> Result<(usize, usize), Error> {
-    let sa_len = index.suffix_array.len();
-
-    // Find lower bound (first position where suffix >= query)
-    let mut left = 0;
-    let mut right = sa_len;
-
-    while left < right {
-        let mid = (left + right) / 2;
-        let cmp = compare_suffix_to_query(read_seq, read_pos, index, mid, min_match)?;
-
-        if cmp < 0 {
-            left = mid + 1;
-        } else {
-            right = mid;
-        }
-    }
-
-    let sa_start = left;
-
-    // Find upper bound (first position where suffix > query)
-    // Reuse left starting from sa_start
-    right = sa_len;
-
-    while left < right {
-        let mid = (left + right) / 2;
-        let cmp = compare_suffix_to_query(read_seq, read_pos, index, mid, min_match)?;
-
-        if cmp <= 0 {
-            left = mid + 1;
-        } else {
-            right = mid;
-        }
-    }
-
-    let sa_end = left;
-
-    Ok((sa_start, sa_end))
-}
-
-/// Compare a genome suffix (from SA) to a read query sequence.
-///
-/// Returns: -1 if suffix < query, 0 if equal (up to min_match), 1 if suffix > query
-fn compare_suffix_to_query(
-    read_seq: &[u8],
-    read_pos: usize,
-    index: &GenomeIndex,
-    sa_idx: usize,
-    min_match: usize,
-) -> Result<i32, Error> {
-    let sa_entry = index.suffix_array.get(sa_idx);
-    let (genome_pos, is_reverse) = index.suffix_array.decode(sa_entry);
-
-    let genome_start = if is_reverse {
-        genome_pos as usize + index.genome.n_genome as usize
-    } else {
-        genome_pos as usize
-    };
-
-    let max_cmp = min_match.min(read_seq.len() - read_pos);
-
-    for i in 0..max_cmp {
-        let read_base = read_seq[read_pos + i];
-        let genome_idx = genome_start + i;
-
-        if genome_idx >= index.genome.sequence.len() {
-            return Ok(-1); // Genome suffix ended
-        }
-
-        let genome_base = index.genome.sequence[genome_idx];
-
-        if genome_base >= 5 {
-            return Ok(-1); // Hit padding
-        }
-
-        match genome_base.cmp(&read_base) {
-            std::cmp::Ordering::Less => return Ok(-1),
-            std::cmp::Ordering::Greater => return Ok(1),
-            std::cmp::Ordering::Equal => continue,
-        }
-    }
-
-    Ok(0) // Equal up to min_match
 }
 
 /// Overflow-safe median of two unsigned integers.

@@ -393,15 +393,10 @@ pub fn cluster_seeds(
 
             let anchor_bin = forward_pos >> win_bin_nbits;
 
-            let wa_entry = WindowAlignment {
-                seed_idx: anchor_idx,
-                read_pos: anchor.read_pos,
-                length,
-                genome_pos: forward_pos,
-                sa_pos,
-                n_rep: n_loci,
-                is_anchor: true,
-            };
+            // STAR's stitchPieces: Phase 1 creates windows from anchor positions
+            // but does NOT populate WA entries. After flank extension, nWA is reset
+            // to 0 (line 115), then Phase 3 re-assigns ALL seeds through
+            // assignAlignToWindow. We match this by not adding entries here.
 
             // Check if this bin already has a window (STAR: skip creation, just assign)
             if let Some(&win_idx) = win_bin.get(&(strand, anchor_bin)) {
@@ -409,7 +404,6 @@ pub fn cluster_seeds(
                 if window.alive && window.chr_idx == chr_idx {
                     window.actual_start = window.actual_start.min(forward_pos);
                     window.actual_end = window.actual_end.max(forward_pos + length as u64);
-                    window.alignments.push(wa_entry);
                     continue;
                 }
             }
@@ -447,8 +441,6 @@ pub fn cluster_seeds(
                     let new_bin_end = right_window.bin_end.max(anchor_bin);
                     let new_actual_start = right_window.actual_start.min(forward_pos);
                     let new_actual_end = right_window.actual_end.max(forward_pos + length as u64);
-                    let right_alignments: Vec<WindowAlignment> = right_window.alignments.clone();
-
                     // Kill right window
                     windows[right_idx].alive = false;
 
@@ -458,8 +450,6 @@ pub fn cluster_seeds(
                     left_window.bin_end = left_window.bin_end.max(new_bin_end);
                     left_window.actual_start = left_window.actual_start.min(new_actual_start);
                     left_window.actual_end = left_window.actual_end.max(new_actual_end);
-                    left_window.alignments.extend(right_alignments);
-                    left_window.alignments.push(wa_entry);
 
                     // Update winBin for all bins from left to right
                     for bin in left_window.bin_start..=left_window.bin_end {
@@ -473,7 +463,6 @@ pub fn cluster_seeds(
                     window.bin_end = window.bin_end.max(anchor_bin);
                     window.actual_start = window.actual_start.min(forward_pos);
                     window.actual_end = window.actual_end.max(forward_pos + length as u64);
-                    window.alignments.push(wa_entry);
 
                     // Update winBin for newly covered bins
                     for bin in window.bin_start..=window.bin_end {
@@ -490,7 +479,7 @@ pub fn cluster_seeds(
                         chr_idx,
                         is_reverse: strand,
                         anchor_idx,
-                        alignments: vec![wa_entry],
+                        alignments: Vec::new(),
                         actual_start: forward_pos,
                         actual_end: forward_pos + length as u64,
                         alive: true,
@@ -527,10 +516,10 @@ pub fn cluster_seeds(
         }
     }
 
-    // Phase 4: Assign ALL seeds to windows (matches STAR's assignAlignToWindow)
-    // Iterate all SA positions per seed — no per-seed cap. Seeds are already bounded
-    // by seedMultimapNmax (default 10000) from seed finding. Window capacity eviction
-    // (seedPerWindowNmax with anchor protection) handles limiting entries per window.
+    // Phase 4: Assign ALL seeds to windows (matches STAR's stitchPieces Phase 3).
+    // STAR resets nWA=0 after window creation, then re-assigns ALL seeds (including
+    // anchors) through assignAlignToWindow. We match this by not pre-loading anchors
+    // in Phase 2 and processing all seeds here through the same capacity logic.
     for (seed_idx, seed) in seeds.iter().enumerate() {
         let n_loci = seed.sa_end - seed.sa_start;
         if n_loci == 0 {
@@ -539,7 +528,6 @@ pub fn cluster_seeds(
         let is_anchor_seed = anchor_set[seed_idx];
 
         for (sa_pos, strand) in seed.genome_positions(index) {
-            // STAR uses MMP length directly (same as anchor phase above)
             let length = seed.length;
             if length < min_seed_length {
                 continue;
@@ -561,21 +549,51 @@ pub fn cluster_seeds(
 
             let window = &mut windows[win_idx];
 
-            // Exact duplicate dedup: skip if same (read_pos, sa_pos) already exists
-            // (Diagonal overlap dedup deferred to DP — avoids removing valid entries
-            // that contribute different match lengths at different positions)
-            if window
-                .alignments
-                .iter()
-                .any(|wa| wa.read_pos == seed.read_pos && wa.sa_pos == sa_pos)
-            {
+            // STAR's WALrec early rejection (assignAlignToWindow line 20):
+            // Non-anchor seeds shorter than the persistent minimum are rejected
+            // before overlap check. Uses strict < (not <=).
+            if !is_anchor_seed && length < window.wa_lrec {
                 continue;
             }
 
-            // STAR's WALrec early rejection: non-anchor seeds shorter than the
-            // persistent minimum are rejected before capacity check. This matches
-            // STAR's assignAlignToWindow where WALrec persists across calls.
-            if !is_anchor_seed && length < window.wa_lrec {
+            // STAR's overlap detection (assignAlignToWindow lines 28-84):
+            // Check if new entry overlaps an existing entry on the same diagonal.
+            // Same diagonal means (genome_pos - read_pos) is equal. If overlap
+            // found, keep the longer entry. This deduplicates shorter seeds
+            // subsumed by longer seeds at the same alignment position.
+            let new_diag = forward_pos as i64 - seed.read_pos as i64;
+            let mut overlap_idx = None;
+            for (i, wa) in window.alignments.iter().enumerate() {
+                let wa_diag = wa.genome_pos as i64 - wa.read_pos as i64;
+                if new_diag == wa_diag {
+                    // Same diagonal — check for overlapping read ranges
+                    // (matches STAR's exact overlap condition)
+                    let new_rstart = seed.read_pos;
+                    let new_rend = seed.read_pos + length;
+                    let wa_rstart = wa.read_pos;
+                    let wa_rend = wa.read_pos + wa.length;
+                    if (new_rstart >= wa_rstart && new_rstart < wa_rend)
+                        || (new_rend >= wa_rstart && new_rend < wa_rend)
+                    {
+                        overlap_idx = Some(i);
+                        break;
+                    }
+                }
+            }
+            if let Some(oi) = overlap_idx {
+                if length > window.alignments[oi].length {
+                    // New entry is longer — replace existing
+                    window.alignments[oi] = WindowAlignment {
+                        seed_idx,
+                        read_pos: seed.read_pos,
+                        length,
+                        genome_pos: forward_pos,
+                        sa_pos,
+                        n_rep: n_loci,
+                        is_anchor: is_anchor_seed,
+                    };
+                }
+                // Either way (replaced or not), don't add as new entry
                 continue;
             }
 
@@ -611,8 +629,6 @@ pub fn cluster_seeds(
 
             // STAR's addition condition: if (aAnchor || aLength > WALrec[iW])
             // Non-anchor entries must be STRICTLY longer than wa_lrec to be added.
-            // Once WALrec is raised (e.g., to 6 after evicting 6bp entries), all
-            // equal-length entries are permanently excluded from this window.
             if !is_anchor_seed && length <= window.wa_lrec {
                 continue;
             }
@@ -630,7 +646,6 @@ pub fn cluster_seeds(
                 is_anchor: is_anchor_seed,
             });
         }
-
     }
 
     // Phase 5: Build SeedCluster output
@@ -820,8 +835,7 @@ fn stitch_align_to_transcript(
             // = max(0, min(STAR_jR, shared)) = max(0, min(jr_shift + shared, shared))
             // Bases [0..junction_offset) → donor genome
             // Bases [junction_offset..shared) → acceptor genome (donor + intron)
-            let junction_offset =
-                (shared as i32 + jr_shift).max(0).min(shared as i32) as usize;
+            let junction_offset = (shared as i32 + jr_shift).max(0).min(shared as i32) as usize;
 
             let mut shared_mm = 0u32;
             let mut shared_score = 0i32;
