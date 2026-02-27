@@ -32,7 +32,7 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Status
 
-**269 tests passing, 0 clippy warnings.** SE: 99.4% position agreement (adjusted), 98.8% CIGAR, 2.0% splice rate (STAR: 2.2%), 64 shared junctions, 99.6% MAPQ agreement. See [ROADMAP.md](ROADMAP.md) for detailed phase tracking and [docs/](docs/) for per-phase notes.
+**269 tests passing, 0 clippy warnings.** SE: 99.5% position agreement (adjusted), 98.7% CIGAR, 2.0% splice rate (STAR: 2.2%), 64 shared junctions, 99.6% MAPQ agreement, 77 actionable disagreements, 7 STAR-only mapped. See [ROADMAP.md](ROADMAP.md) for detailed phase tracking and [docs/](docs/) for per-phase notes.
 
 ## Source Layout
 
@@ -132,13 +132,13 @@ predicates = "3"
 
 ## Known Issues — Disagreement Root Causes (10k SE yeast)
 
-148 total position disagreements, 5 root causes identified:
+142 total position disagreements, 77 actionable:
 
-1. **Diff-chr multi-mapper ties (96 reads)** — Same CIGAR/MAPQ, different positions in repeat copies (rDNA). **Unavoidable** without matching STAR's random seed.
-2. **MAPQ inflation (38 reads)** — ruSTAR=255 (unique) when STAR sees multiple loci. Missing multi-mapping locations.
+1. **Diff-chr multi-mapper ties (99 reads)** — Same CIGAR/MAPQ, different positions in repeat copies (rDNA). **Unavoidable** without matching STAR's random seed.
+2. **MAPQ inflation (30 reads)** — ruSTAR=255 (unique) when STAR sees multiple loci. Missing multi-mapping locations.
 3. **Missed splices (~15 reads)** — STAR finds spliced alignment, ruSTAR doesn't. Often short first exon (5-22bp) + large intron.
-4. **Mapping-only differences (~59 reads)** — 32 STAR-only + 27 ruSTAR-only mapped.
-5. **Same-chr position differences (~9 reads)** — Different alignment choices at repeat regions or spliced vs unspliced.
+4. **Mapping-only differences (~34 reads)** — 7 STAR-only (2 missed splices + 5 extension edge cases) + 27 ruSTAR-only mapped.
+5. **Same-chr position differences (~41 reads)** — Different alignment choices at repeat regions or spliced vs unspliced.
 
 See [ROADMAP.md](ROADMAP.md) and [docs/](docs/) for full issue tracking.
 

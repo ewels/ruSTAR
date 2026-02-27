@@ -180,46 +180,9 @@ pub fn align_read(
     let mut clusters = clusters;
     clusters.truncate(params.align_windows_per_read_nmax);
 
-    // Step 2a: Filter clusters by seed coverage (winReadCoverageRelativeMin)
-    let read_length = read_seq.len();
-    let min_coverage = params.win_read_coverage_relative_min;
-    let clusters: Vec<_> = clusters
-        .into_iter()
-        .filter(|cluster| {
-            // Compute total seed coverage for this cluster (union of read ranges)
-            let mut covered = vec![false; read_length];
-            for wa in &cluster.alignments {
-                let end = wa.read_pos + wa.length;
-                for c in covered
-                    .iter_mut()
-                    .take(end.min(read_length))
-                    .skip(wa.read_pos)
-                {
-                    *c = true;
-                }
-            }
-            let coverage = covered.iter().filter(|&&c| c).count() as f64 / read_length as f64;
-            coverage >= min_coverage
-        })
-        .collect();
-
-    if debug_read {
-        eprintln!(
-            "[DEBUG {}] After coverage filter: {} clusters",
-            read_name,
-            clusters.len()
-        );
-    }
-
-    if clusters.is_empty() {
-        if debug_read {
-            eprintln!(
-                "[DEBUG {}] All clusters filtered by coverage — unmapped",
-                read_name
-            );
-        }
-        return Ok((Vec::new(), Vec::new(), 0, Some(UnmappedReason::Other)));
-    }
+    // NOTE: STAR's winReadCoverageRelativeMin filter is long-reads-only
+    // (#ifdef COMPILE_FOR_LONG_READS in stitchPieces.cpp). Standard STAR
+    // does NOT filter clusters by seed coverage. Removed to match STAR.
 
     // Step 2b: Detect chimeric alignments from multi-cluster seeds (Tier 2)
     let mut chimeric_alignments = Vec::new();
@@ -284,7 +247,10 @@ pub fn align_read(
     }
 
     // Step 4: Filter transcripts
+    // STAR uses (Lread-1) for relative thresholds and casts to integer
+    // (ReadAlign_mappedFilter.cpp lines 8-9)
     let read_length = read_seq.len() as f64;
+    let lread_m1 = (read_seq.len() as f64) - 1.0;
 
     // Log filtering statistics
     let pre_filter_count = transcripts.len();
@@ -297,8 +263,8 @@ pub fn align_read(
             return false;
         }
 
-        // Relative score threshold (score / read_length)
-        if (t.score as f64) < params.out_filter_score_min_over_lread * read_length {
+        // Relative score threshold: STAR casts to intScore (i32)
+        if t.score < (params.out_filter_score_min_over_lread * lread_m1) as i32 {
             *filter_reasons.entry("score_min_relative").or_insert(0) += 1;
             return false;
         }
@@ -340,8 +306,8 @@ pub fn align_read(
             return false;
         }
 
-        // Relative matched bases (matched / read_length)
-        if (n_matched as f64) < params.out_filter_match_nmin_over_lread * read_length {
+        // Relative matched bases: STAR casts to uint (u32)
+        if n_matched < (params.out_filter_match_nmin_over_lread * lread_m1) as u32 {
             *filter_reasons.entry("match_min_relative").or_insert(0) += 1;
             return false;
         }
@@ -637,12 +603,14 @@ fn rescue_unmapped_mate(
     }
 
     // Step 6: Apply quality filters (same as align_read)
+    // STAR uses (Lread-1) for relative thresholds and casts to integer
     let read_length = unmapped_seq.len() as f64;
+    let lread_m1 = (unmapped_seq.len() as f64) - 1.0;
     transcripts.retain(|t| {
         if t.score < params.out_filter_score_min {
             return false;
         }
-        if (t.score as f64) < params.out_filter_score_min_over_lread * read_length {
+        if t.score < (params.out_filter_score_min_over_lread * lread_m1) as i32 {
             return false;
         }
         if t.n_mismatch > params.out_filter_mismatch_nmax {
@@ -656,7 +624,7 @@ fn rescue_unmapped_mate(
         if n_matched < params.out_filter_match_nmin {
             return false;
         }
-        if (n_matched as f64) < params.out_filter_match_nmin_over_lread * read_length {
+        if n_matched < (params.out_filter_match_nmin_over_lread * lread_m1) as u32 {
             return false;
         }
         true
@@ -947,14 +915,17 @@ fn filter_paired_transcripts(paired_alns: &mut Vec<PairedAlignment>, params: &Pa
         let mate2_len = (pa.mate2_region.1 - pa.mate2_region.0) as f64;
 
         // Check each mate independently for per-read thresholds
+        // STAR uses (Lread-1) for relative thresholds and casts to integer
         for (t, read_len) in [(t1, mate1_len), (t2, mate2_len)] {
+            let lread_m1 = read_len - 1.0;
+
             // Absolute score threshold (per mate)
             if t.score < params.out_filter_score_min {
                 return false;
             }
 
-            // Relative score threshold (per mate)
-            if (t.score as f64) < params.out_filter_score_min_over_lread * read_len {
+            // Relative score threshold (per mate): STAR casts to intScore
+            if t.score < (params.out_filter_score_min_over_lread * lread_m1) as i32 {
                 return false;
             }
 
@@ -974,8 +945,8 @@ fn filter_paired_transcripts(paired_alns: &mut Vec<PairedAlignment>, params: &Pa
                 return false;
             }
 
-            // Relative matched bases (per mate)
-            if (n_matched as f64) < params.out_filter_match_nmin_over_lread * read_len {
+            // Relative matched bases (per mate): STAR casts to uint
+            if n_matched < (params.out_filter_match_nmin_over_lread * lread_m1) as u32 {
                 return false;
             }
         }
