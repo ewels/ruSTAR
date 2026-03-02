@@ -279,6 +279,49 @@ Removed anchor fallback in `cluster_seeds()` (no longer needed with accurate SA 
 
 ---
 
+## Phase 16.26: SA Range Narrowing Fix ✅ (2026-02-XX)
+
+**Problem**: Two bugs in `find_mult_range()` and `max_mappable_length()` in `seed.rs` caused incorrect SA range widths for near-identical tandem repeats (rDNA copies ~9kb apart, chr II/XVI paralogs).
+
+**Bug 1**: `find_mult_range()` returned early when `l1 >= l3`. STAR's `findMultRange` continues searching outward using history variables `(ia, ib)`. Fixed to match STAR: set up search range based on whether `l1 < l3`, `l1a < l1`, or `l1a >= l1`.
+
+**Bug 2**: `max_mappable_length()` unconditionally shifted history (`i1a = i1b; i1b = i1;`). STAR guards with `if (L3>L1)`. Added guard: only shift when `l3 > l1` / `l3 > l2`.
+
+**Impact**: Near-identical tandem repeats get correct SA range width (2 instead of 1) → correct NH → correct MAPQ.
+- MAPQ inflation: 23 → 12 (-11)
+- STAR-only mapped: 2 → 0
+- Actionable disagreements: 46 → 37 (-9)
+- Splice rate: 2.1% → 2.2% (matches STAR exactly)
+
+**Files**: `src/align/seed.rs`
+
+---
+
+## Phase 16.27: Reverse-Strand Stitcher Coordinate Fix ✅ (2026-03-02)
+
+**Problem**: For reverse-strand clusters, gap-fill scoring in the recursive stitcher compared read bases against the wrong genome region, inflating false splice scores. E.g., a 563kb false intron scored 126 instead of the correct 124, beating the true unspliced alignment (AS=125).
+
+**Root cause**: STAR stores `WA_gStart` in **forward** genome coordinates (converting via `a1 = nGenome - (aLength + a1)` in `ReadAlign_stitchPieces.cpp`) and uses `Read1[1]` (the RC read) for reverse-strand stitching. Our code used SA positions (RC genome offsets) with the forward read, so gap-fill between seeds was scored against genome adjacent to the wrong seed.
+
+**Fix** (in `stitch_seeds_with_jdb_debug`, `src/align/stitch.rs:~1840`):
+1. For reverse-strand clusters: RC the read (`read_seq.iter().rev().map(|&b| 3-b)`)
+2. Convert WA entries: `wa.read_pos = read_len - (wa.read_pos + wa.length)` (→ positive-strand read pos) and `wa.sa_pos = wa.genome_pos` (→ forward genome pos)
+3. Stitch as if forward strand (`stitch_cluster.is_reverse = false`)
+4. Restore `transcript.is_reverse = true` and original `read_seq` in output transcripts
+
+**Impact**:
+- All 4 false splice reads fixed (introns of 563kb, 150kb, 139kb, 72bp)
+- Actionable disagreements: 37 → 28 (-9, -24%)
+- MAPQ inflation: 12 → 5 (-7)
+- MAPQ deflation: 1 → 2 (+1, two new cases of extra unspliced secondary)
+- Same-chr disagreements: 35 → 26 (-9)
+- Adjusted pos agreement: 99.6% → 99.7%
+- Splice rate: 2.2% (unchanged)
+
+**Files**: `src/align/stitch.rs`
+
+---
+
 ## Phase 16.11: PE Joint DP Stitching — PLANNED
 
 263 pairs (2.9%) are half-mapped. STAR maps both via joint mate-aware DP with fragment length gap penalty. Seeds from both mates in same genomic window participate in DP together.

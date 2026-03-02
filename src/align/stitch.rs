@@ -598,16 +598,31 @@ pub fn cluster_seeds(
             }
             if let Some(oi) = overlap_idx {
                 if length > window.alignments[oi].length {
-                    // New entry is longer — replace existing
-                    window.alignments[oi] = WindowAlignment {
-                        seed_idx,
-                        read_pos: seed.read_pos,
-                        length,
-                        genome_pos: forward_pos,
-                        sa_pos,
-                        n_rep: n_loci,
-                        is_anchor: is_anchor_seed,
-                    };
+                    // New entry is longer — remove old and re-insert at correct
+                    // sorted position (matches STAR assignAlignToWindow lines 26-62).
+                    // The new entry may have a different length → different ps_rstart
+                    // → different sort position.
+                    window.alignments.remove(oi);
+                    let insert_pos = window.alignments.partition_point(|wa| {
+                        let wa_ps = if window.is_reverse {
+                            read_len - (wa.length + wa.read_pos)
+                        } else {
+                            wa.read_pos
+                        };
+                        wa_ps < new_ps_rstart
+                    });
+                    window.alignments.insert(
+                        insert_pos,
+                        WindowAlignment {
+                            seed_idx,
+                            read_pos: seed.read_pos,
+                            length,
+                            genome_pos: forward_pos,
+                            sa_pos,
+                            n_rep: n_loci,
+                            is_anchor: is_anchor_seed,
+                        },
+                    );
                 }
                 // Either way (replaced or not), don't add as new entry
                 continue;
@@ -649,18 +664,30 @@ pub fn cluster_seeds(
                 continue;
             }
 
-            // Insert the new WA entry
+            // Insert in sorted order by positive-strand read start (matches
+            // STAR's assignAlignToWindow lines 107-115 sorted insertion).
             window.actual_start = window.actual_start.min(forward_pos);
             window.actual_end = window.actual_end.max(forward_pos + length as u64);
-            window.alignments.push(WindowAlignment {
-                seed_idx,
-                read_pos: seed.read_pos,
-                length,
-                genome_pos: forward_pos,
-                sa_pos,
-                n_rep: n_loci,
-                is_anchor: is_anchor_seed,
+            let insert_pos = window.alignments.partition_point(|wa| {
+                let wa_ps = if window.is_reverse {
+                    read_len - (wa.length + wa.read_pos)
+                } else {
+                    wa.read_pos
+                };
+                wa_ps < new_ps_rstart
             });
+            window.alignments.insert(
+                insert_pos,
+                WindowAlignment {
+                    seed_idx,
+                    read_pos: seed.read_pos,
+                    length,
+                    genome_pos: forward_pos,
+                    sa_pos,
+                    n_rep: n_loci,
+                    is_anchor: is_anchor_seed,
+                },
+            );
         }
     }
 
@@ -1746,20 +1773,28 @@ pub(crate) fn stitch_seeds_with_jdb_debug(
     // of repetitive seeds, matching STAR's WA_Anchor=2 "last anchor" logic.
     let mut wa_entries: Vec<WindowAlignment> = cluster.alignments.clone();
 
-    // Diagonal dedup: for each diagonal (sa_pos - read_pos), merge overlapping
+    // Diagonal dedup: for each diagonal (genome_pos - ps_rstart), merge overlapping
     // seeds into intervals, keeping only the longest seed per merged interval.
     // This prevents combinatorial explosion in the recursive stitcher when many
     // redundant seeds cover the same diagonal region.
+    // Uses positive-strand coordinates consistent with cluster_seeds overlap detection.
     {
         use std::collections::HashMap;
+        let read_len = read_seq.len();
+        let is_rev = cluster.is_reverse;
         // For each diagonal, find the longest seed per merged interval
         let mut diag_seeds: HashMap<i64, Vec<(usize, usize, usize)>> = HashMap::new();
         for (idx, wa) in wa_entries.iter().enumerate() {
-            let diag = wa.sa_pos as i64 - wa.read_pos as i64;
+            let ps = if is_rev {
+                read_len - (wa.length + wa.read_pos)
+            } else {
+                wa.read_pos
+            };
+            let diag = wa.genome_pos as i64 - ps as i64;
             diag_seeds
                 .entry(diag)
                 .or_default()
-                .push((wa.read_pos, wa.read_pos + wa.length, idx));
+                .push((ps, ps + wa.length, idx));
         }
 
         let mut keep_indices = std::collections::HashSet::new();
@@ -1801,9 +1836,48 @@ pub(crate) fn stitch_seeds_with_jdb_debug(
         });
     }
 
-    // Sort ascending by read_pos: the stitcher processes seeds left-to-right in read
-    // coordinates, and genome_gap = new_sa_pos - prev_sa_pos is positive only when
-    // read_pos increases monotonically (forward-strand alignment in SA coordinate space).
+    // STAR-faithful coordinate conversion for stitching:
+    // STAR stores WA_gStart in FORWARD genome coordinates (converting RC positions via
+    // a1 = nGenome - (aLength + a1)) and uses the RC read for reverse-strand stitching.
+    // This ensures gap-fill bases between seeds are scored against the correct genome
+    // region. Without this, reverse-strand gap-fill scoring compares against genome
+    // adjacent to the wrong seed, inflating false splice scores.
+    let stitch_is_reverse = cluster.is_reverse;
+    let rc_read_storage: Vec<u8> = if cluster.is_reverse {
+        // RC the read: STAR uses Read1[1] (RC read) for reverse-strand stitching
+        read_seq
+            .iter()
+            .rev()
+            .map(|&b| if b < 4 { 3 - b } else { b })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let stitch_read: &[u8] = if cluster.is_reverse {
+        &rc_read_storage
+    } else {
+        read_seq
+    };
+
+    if cluster.is_reverse {
+        // Convert WA entries to positive-strand read coords + forward genome coords
+        let read_len = read_seq.len();
+        for wa in &mut wa_entries {
+            wa.read_pos = read_len - (wa.read_pos + wa.length);
+            wa.sa_pos = wa.genome_pos;
+        }
+    }
+
+    // Create cluster for stitching (is_reverse=false for reverse-strand, so stitcher
+    // uses forward genome coords without RC genome offset)
+    let stitch_cluster = SeedCluster {
+        is_reverse: if stitch_is_reverse { false } else { cluster.is_reverse },
+        ..cluster.clone()
+    };
+
+    // Sort ascending by read_pos (positive-strand coordinates after conversion).
+    // STAR's WA array is sorted by aRstart (positive-strand read position, ascending).
+    // With forward genome coords, gaps are computed correctly for both strands.
     wa_entries.sort_by(|a, b| a.read_pos.cmp(&b.read_pos).then(b.length.cmp(&a.length)));
 
     // Cap entries to prevent exponential blowup in the recursive stitcher.
@@ -1821,15 +1895,16 @@ pub(crate) fn stitch_seeds_with_jdb_debug(
 
     if debug {
         eprintln!(
-            "[DEBUG-STITCH {}] {} WA entries (is_reverse={})",
+            "[DEBUG-STITCH {}] {} WA entries (is_reverse={}, stitch_as_fwd={})",
             debug_read_name,
             wa_entries.len(),
-            cluster.is_reverse
+            cluster.is_reverse,
+            stitch_is_reverse
         );
         for (i, wa) in wa_entries.iter().enumerate().take(30) {
             eprintln!(
-                "  wa[{}]: read_pos={}, sa_pos={}, length={}, anchor={}",
-                i, wa.read_pos, wa.sa_pos, wa.length, wa.is_anchor
+                "  wa[{}]: read_pos={}, sa_pos={}, genome_pos={}, length={}, anchor={}",
+                i, wa.read_pos, wa.sa_pos, wa.genome_pos, wa.length, wa.is_anchor
             );
         }
         if wa_entries.len() > 30 {
@@ -1849,10 +1924,10 @@ pub(crate) fn stitch_seeds_with_jdb_debug(
         WorkingTranscript::new(),
         &wa_entries,
         last_anchor_idx,
-        read_seq,
+        stitch_read,
         index,
         scorer,
-        cluster,
+        &stitch_cluster,
         junction_db,
         max_transcripts_per_window,
         &mut working_transcripts,
@@ -1871,7 +1946,17 @@ pub(crate) fn stitch_seeds_with_jdb_debug(
     // Finalize working transcripts → Transcript (filtering by overhang+repeat check)
     let mut transcripts: Vec<Transcript> = Vec::with_capacity(working_transcripts.len());
     for wt in &working_transcripts {
-        if let Some(transcript) = finalize_transcript(wt, read_seq, index, scorer, cluster) {
+        if let Some(mut transcript) =
+            finalize_transcript(wt, stitch_read, index, scorer, &stitch_cluster)
+        {
+            // Restore original reverse-strand flag and read sequence for SAM output.
+            // The stitcher processed with is_reverse=false and RC read, but the final
+            // Transcript needs: is_reverse=true (for SAM FLAG) and original read_seq
+            // (SAM writer RC's it for display).
+            if stitch_is_reverse {
+                transcript.is_reverse = true;
+                transcript.read_seq = read_seq.to_vec();
+            }
             transcripts.push(transcript);
         }
     }

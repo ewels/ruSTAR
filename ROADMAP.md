@@ -49,7 +49,7 @@ Paired-end (Phase 8) builds on threaded infrastructure. GTF/junctions (Phase 7) 
 | 12 | Chimeric Detection | ✅ | 170 | SE chimeric, Chimeric.out.junction |
 | [13](docs/phase13_accuracy.md) | Performance + Accuracy | ✅ | 205 | 94.5% pos, 97.8% CIGAR, 2.1% splice |
 | [15](docs/phase15_sam_tags.md) | SAM Tags + PE Fix | ✅ | 235 | NH/HI/AS/NM/nM/XS/jM/jI/MD, PE fix |
-| [16](docs/phase16_algorithm.md) | Algorithm Parity | ✅* | 269 | 99.5% pos, 2.0% splice, 99.6% MAPQ, 54 actionable, 8 STAR-only / 3 ruSTAR-only |
+| [16](docs/phase16_algorithm.md) | Algorithm Parity | ✅* | 269 | 99.7% pos, 2.2% splice, 99.9% MAPQ, 28 actionable, 1 STAR-only / 1 ruSTAR-only |
 | [17](docs/phase17_features.md) | Features + Polish | ✅* | 269 | Log.final.out, clippy cleanup, sorted BAM planned |
 | 14 | STARsolo | DEFERRED | — | Waiting for accuracy parity |
 
@@ -180,16 +180,18 @@ See [docs/phase15_sam_tags.md](docs/phase15_sam_tags.md) for detailed sub-phase 
 
 See [docs/phase16_algorithm.md](docs/phase16_algorithm.md) for sub-phase notes (16.1-16.13), [docs/phase16_14_nstart_fix.md](docs/phase16_14_nstart_fix.md) for the Nstart fix.
 
-**Summary**: Bin-based windowing, pre-DP seed extension, MMP SA range narrowing, multi-transcript DP, recursive combinatorial stitcher, STAR-faithful scoring (scoreStitchSJshift removed), sparse bidirectional seed search with Nstart +1 fix, WALrec persistent threshold, post-jR shared base scoring, hierarchical SAindex lookup, nWA reset + overlap detection, coverage filter removal, Lread-1 filter fix, too-many-loci filter (99.5% pos adjusted, 98.7% CIGAR, 2.0% splice, 99.6% MAPQ agree, 54 actionable), mate rescue.
+**Summary**: Bin-based windowing, pre-DP seed extension, MMP SA range narrowing, multi-transcript DP, recursive combinatorial stitcher, STAR-faithful scoring (scoreStitchSJshift removed), sparse bidirectional seed search with Nstart +1 fix, WALrec persistent threshold, post-jR shared base scoring, hierarchical SAindex lookup, nWA reset + overlap detection, coverage filter removal, Lread-1 filter fix, too-many-loci filter, mate rescue, SA range narrowing fix (find_mult_range + max_mappable_length), reverse-strand stitcher coordinate fix (RC read + forward genome coords).
 
-**Remaining disagreements (10k SE yeast, 141 total, 54 actionable):**
+**Remaining disagreements (10k SE yeast, 126 total, 28 actionable):**
 
 | Root Cause | Count | Status |
 |-----------|-------|--------|
-| Diff-chr multi-mapper ties | 98 | Unavoidable (random seed) |
-| Same-chr repeat/algorithm | ~41 | Mix of unavoidable + algorithm differences |
-| MAPQ inflation (ruSTAR=255, STAR=multi) | 30 | Related to multi-loci discovery |
-| Mapping-only differences | ~11 | 8 STAR-only + 3 ruSTAR-only |
+| Diff-chr multi-mapper ties | 100 | Unavoidable (random seed) |
+| Same-chr repeat ties | ~19 | Unavoidable (XII rDNA, IV segmental dups) |
+| Wrong intron choice | 4 | ruSTAR picks different large intron at repeat loci |
+| MAPQ inflation | 5 | ruSTAR misses spliced/indel secondary |
+| MAPQ deflation | 2 | ruSTAR generates extra unspliced secondary |
+| Mapping-only | 2 | 1 STAR-only (missed) + 1 ruSTAR-only (false splice) |
 
 ---
 
