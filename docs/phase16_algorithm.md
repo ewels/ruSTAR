@@ -322,6 +322,21 @@ Removed anchor fallback in `cluster_seeds()` (no longer needed with accurate SA 
 
 ---
 
-## Phase 16.11: PE Joint DP Stitching — PLANNED
+## Phase 16.11: PE Joint DP Stitching — NEXT
 
-263 pairs (2.9%) are half-mapped. STAR maps both via joint mate-aware DP with fragment length gap penalty. Seeds from both mates in same genomic window participate in DP together.
+**Target**: 263 half-mapped pairs (2.9% of PE reads). STAR maps both mates via joint mate-aware DP in a shared genomic window with a fragment-length gap penalty. Currently ruSTAR handles these as half-mapped after independent mate alignment + rescue fail.
+
+**Why this over remaining SE issues**: The 7 remaining fixable SE disagreements are diminishing-returns territory (3 missed splices sharing a hard root cause of short exon + large intron, 1 jR scan 4bp, 1 false splice, 1 missed mapping). PE half-mapped affects 263 pairs = ~37× more reads. See ROADMAP.md "Remaining SE Fixable Issues" for the full analysis.
+
+**Remaining SE fixable issues (deferred)**:
+
+| Read | Issue | Difficulty |
+|------|-------|------------|
+| ERR12389696.8053640 | jR scan boundary off by 4 bp | Low |
+| ERR12389696.18296181 | ruSTAR false splice, 279 kb (adapter contamination) | Medium |
+| ERR12389696.8788548 | Missed splice: 127 kb intron, same start pos | High |
+| ERR12389696.12389135 | Missed splice: 38 kb intron → MAPQ inflation | High |
+| ERR12389696.5150933 | Missed splice: 58 kb intron, diff start pos | High |
+| ERR12389696.13766843 | STAR-only: high-mismatch read (NM=10) | Unknown |
+
+The three missed splices are the hardest remaining class: short first exon + very large intron that the stitcher doesn't explore exhaustively enough. May become easier to address after PE joint DP work touches the stitcher.

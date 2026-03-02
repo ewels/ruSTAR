@@ -182,16 +182,29 @@ See [docs/phase16_algorithm.md](docs/phase16_algorithm.md) for sub-phase notes (
 
 **Summary**: Bin-based windowing, pre-DP seed extension, MMP SA range narrowing, multi-transcript DP, recursive combinatorial stitcher, STAR-faithful scoring (scoreStitchSJshift removed), sparse bidirectional seed search with Nstart +1 fix, WALrec persistent threshold, post-jR shared base scoring, hierarchical SAindex lookup, nWA reset + overlap detection, coverage filter removal, Lread-1 filter fix, too-many-loci filter, mate rescue, SA range narrowing fix (find_mult_range + max_mappable_length), reverse-strand stitcher coordinate fix (RC read + forward genome coords).
 
-**Remaining disagreements (10k SE yeast, 126 total, 28 actionable):**
+**SE parity (10k yeast, strict match: same chr + exact pos + same splice junctions):**
 
-| Root Cause | Count | Status |
-|-----------|-------|--------|
-| Diff-chr multi-mapper ties | 100 | Unavoidable (random seed) |
-| Same-chr repeat ties | ~19 | Unavoidable (XII rDNA, IV segmental dups) |
-| Wrong intron choice | 4 | ruSTAR picks different large intron at repeat loci |
-| MAPQ inflation | 5 | ruSTAR misses spliced/indel secondary |
-| MAPQ deflation | 2 | ruSTAR generates extra unspliced secondary |
-| Mapping-only | 2 | 1 STAR-only (missed) + 1 ruSTAR-only (false splice) |
+| Category | Count | % | Fixable? |
+|----------|-------|---|----------|
+| Exact match (chr + pos + CIGAR) | 8792 | 98.49% | — |
+| Splice match (chr + pos + introns, CIGAR differs) | 1 | 0.01% | — |
+| **Total match** | **8793** | **98.50%** | — |
+| Unavoidable ties (repeat copy tiebreaking, same score) | 127 | 1.42% | No |
+| Fixable algorithm differences | 7 | 0.08% | Yes |
+| **Parity excl. unavoidable ties** | **8920/8927** | **99.92%** | — |
+
+**Remaining fixable SE issues (deferred — see [docs/phase16_algorithm.md](docs/phase16_algorithm.md) Phase 16.11):**
+
+| Issue | Count | Difficulty |
+|-------|-------|------------|
+| Missed splices (short exon + large intron) | 3 | High |
+| jR scan boundary off by 4 bp | 1 | Low |
+| ruSTAR false splice (adapter contamination, 279 kb) | 1 | Medium |
+| STAR-only (high-mismatch read) | 1 | Unknown |
+
+**Decision**: SE is at 99.92% parity. Remaining fixable issues are hard and low-yield. Next priority: PE joint DP stitching (263 half-mapped pairs, 2.9% of PE data).
+
+**Phase 16.11: PE Joint DP Stitching — IN PROGRESS**
 
 ---
 

@@ -77,6 +77,16 @@
 
 ---
 
+---
+
+## Phase 17.2: Coordinate-Sorted BAM — Planned
+
+High user value. STAR outputs `--outSAMtype BAM SortedByCoordinate` natively. Options:
+1. In-memory sort during write (requires buffering all records)
+2. Wrapper calling `samtools sort` (simpler, already documented as workaround)
+
+---
+
 ## Phase 14: STARsolo (Single-Cell) — DEFERRED
 
-**Prerequisite**: All accuracy gaps resolved, position agreement >99%. (Current: 99.3% adjusted pos)
+**Prerequisite**: All accuracy gaps resolved, position agreement >99%. (Current: 99.92% parity excluding unavoidable ties)
