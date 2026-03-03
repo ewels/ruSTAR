@@ -467,21 +467,18 @@ impl SamWriter {
                 Value::from(mapped_transcript.n_mismatch as i32),
             );
         }
-        if attrs.contains("XS") {
-            if let Some(xs_strand) = derive_xs_strand(mapped_transcript) {
+        if attrs.contains("XS")
+            && let Some(xs_strand) = derive_xs_strand(mapped_transcript) {
                 data.insert(Tag::new(b'X', b'S'), Value::Character(xs_strand as u8));
             }
-        }
-        if attrs.contains("jM") {
-            if let Some(jm) = build_jm_tag(mapped_transcript) {
+        if attrs.contains("jM")
+            && let Some(jm) = build_jm_tag(mapped_transcript) {
                 data.insert(Tag::new(b'j', b'M'), jm);
             }
-        }
-        if attrs.contains("jI") {
-            if let Some(ji) = build_ji_tag(mapped_transcript, chr_start) {
+        if attrs.contains("jI")
+            && let Some(ji) = build_ji_tag(mapped_transcript, chr_start) {
                 data.insert(Tag::new(b'j', b'I'), ji);
             }
-        }
         if attrs.contains("MD") {
             let md = build_md_tag(
                 mapped_transcript,
@@ -715,21 +712,18 @@ fn transcript_to_record(
             Value::from(transcript.n_mismatch as i32),
         );
     }
-    if attrs.contains("XS") {
-        if let Some(xs_strand) = derive_xs_strand(transcript) {
+    if attrs.contains("XS")
+        && let Some(xs_strand) = derive_xs_strand(transcript) {
             data.insert(Tag::new(b'X', b'S'), Value::Character(xs_strand as u8));
         }
-    }
-    if attrs.contains("jM") {
-        if let Some(jm) = build_jm_tag(transcript) {
+    if attrs.contains("jM")
+        && let Some(jm) = build_jm_tag(transcript) {
             data.insert(Tag::new(b'j', b'M'), jm);
         }
-    }
-    if attrs.contains("jI") {
-        if let Some(ji) = build_ji_tag(transcript, chr_start) {
+    if attrs.contains("jI")
+        && let Some(ji) = build_ji_tag(transcript, chr_start) {
             data.insert(Tag::new(b'j', b'I'), ji);
         }
-    }
     if attrs.contains("MD") {
         let md = build_md_tag(transcript, read_seq, genome, transcript.is_reverse);
         data.insert(Tag::new(b'M', b'D'), Value::String(BString::from(md)));
@@ -1049,21 +1043,18 @@ fn build_paired_mate_record(
             Value::from(transcript.n_mismatch as i32),
         );
     }
-    if attrs.contains("XS") {
-        if let Some(xs_strand) = derive_xs_strand(transcript) {
+    if attrs.contains("XS")
+        && let Some(xs_strand) = derive_xs_strand(transcript) {
             data.insert(Tag::new(b'X', b'S'), Value::Character(xs_strand as u8));
         }
-    }
-    if attrs.contains("jM") {
-        if let Some(jm) = build_jm_tag(transcript) {
+    if attrs.contains("jM")
+        && let Some(jm) = build_jm_tag(transcript) {
             data.insert(Tag::new(b'j', b'M'), jm);
         }
-    }
-    if attrs.contains("jI") {
-        if let Some(ji) = build_ji_tag(transcript, chr_start) {
+    if attrs.contains("jI")
+        && let Some(ji) = build_ji_tag(transcript, chr_start) {
             data.insert(Tag::new(b'j', b'I'), ji);
         }
-    }
     if attrs.contains("MD") {
         let md = build_md_tag(transcript, mate_seq, genome, transcript.is_reverse);
         data.insert(Tag::new(b'M', b'D'), Value::String(BString::from(md)));

@@ -811,7 +811,7 @@ fn align_reads_paired_end<W: AlignmentWriter>(
 
                 // Align paired read (CPU-intensive)
                 let (results, n_for_mapq, unmapped_reason) =
-                    align_paired_read(&m1_seq, &m2_seq, &index, params)?;
+                    align_paired_read(&m1_seq, &m2_seq, &paired_read.name, &index, params)?;
 
                 // Classify the result for stats and SAM output
                 let has_half_mapped = results

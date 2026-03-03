@@ -42,11 +42,9 @@ fn count_mismatches_in_region(
         if let Some(genome_base) = index
             .genome
             .get_base(genome_start + i as u64 + genome_offset)
-        {
-            if read_base != genome_base && read_base != 4 && genome_base != 4 {
+            && read_base != genome_base && read_base != 4 && genome_base != 4 {
                 n_mismatch += 1;
             }
-        }
     }
 
     n_mismatch
@@ -74,11 +72,9 @@ fn count_mismatches(
                     if read_pos < read_seq.len() {
                         let read_base = read_seq[read_pos];
                         if let Some(genome_base) = index.genome.get_base(genome_pos + genome_offset)
-                        {
-                            if read_base != genome_base && read_base != 4 && genome_base != 4 {
+                            && read_base != genome_base && read_base != 4 && genome_base != 4 {
                                 n_mismatch += 1;
                             }
-                        }
                     }
                     read_pos += 1;
                     genome_pos += 1;
@@ -264,6 +260,8 @@ pub struct WindowAlignment {
     pub n_rep: usize,
     /// Whether this entry is an anchor (protected from capacity eviction)
     pub is_anchor: bool,
+    /// Mate ID: 0=mate1, 1=mate2, 2=SE (STAR: PC[iP][PC_iFrag] / WA[iW][iS][WA_iFrag])
+    pub mate_id: u8,
 }
 
 /// A cluster of seeds mapping to the same genomic region
@@ -621,6 +619,7 @@ pub fn cluster_seeds(
                             sa_pos,
                             n_rep: n_loci,
                             is_anchor: is_anchor_seed,
+                            mate_id: seed.mate_id,
                         },
                     );
                 }
@@ -686,6 +685,7 @@ pub fn cluster_seeds(
                     sa_pos,
                     n_rep: n_loci,
                     is_anchor: is_anchor_seed,
+                    mate_id: seed.mate_id,
                 },
             );
         }
@@ -714,32 +714,34 @@ pub fn cluster_seeds(
 
 /// Lightweight exon block for in-progress transcript during recursion
 #[derive(Debug, Clone)]
-struct ExonBlock {
-    read_start: usize, // 0-based inclusive
-    read_end: usize,   // 0-based exclusive
-    genome_start: u64, // SA coordinate space (raw sa_pos)
-    genome_end: u64,   // SA coordinate space (exclusive)
+pub(crate) struct ExonBlock {
+    pub(crate) read_start: usize,    // 0-based inclusive
+    pub(crate) read_end: usize,      // 0-based exclusive
+    pub(crate) genome_start: u64,    // SA coordinate space (raw sa_pos)
+    pub(crate) genome_end: u64,      // SA coordinate space (exclusive)
+    /// Mate ID: 0=mate1, 1=mate2, 2=SE (STAR: EX_iFrag)
+    pub(crate) mate_id: u8,
 }
 
 /// In-progress transcript during recursive search (cheap to clone)
 #[derive(Debug, Clone)]
-struct WorkingTranscript {
-    exons: Vec<ExonBlock>,
-    score: i32,
-    n_mismatch: u32,
-    n_gap: u32,
-    n_junction: u32,
-    junction_motifs: Vec<crate::align::score::SpliceMotif>,
-    junction_annotated: Vec<bool>,
+pub(crate) struct WorkingTranscript {
+    pub(crate) exons: Vec<ExonBlock>,
+    pub(crate) score: i32,
+    pub(crate) n_mismatch: u32,
+    pub(crate) n_gap: u32,
+    pub(crate) n_junction: u32,
+    pub(crate) junction_motifs: Vec<crate::align::score::SpliceMotif>,
+    pub(crate) junction_annotated: Vec<bool>,
     /// Per-junction repeat lengths (jjL, jjR) for overhang check at finalization.
     /// STAR's shiftSJ[isj][0] and shiftSJ[isj][1].
-    junction_shifts: Vec<(u32, u32)>,
-    n_anchor: u32,
+    pub(crate) junction_shifts: Vec<(u32, u32)>,
+    pub(crate) n_anchor: u32,
     // Tight bounds for extension at finalization
-    read_start: usize,
-    read_end: usize,
-    genome_start: u64,
-    genome_end: u64,
+    pub(crate) read_start: usize,
+    pub(crate) read_end: usize,
+    pub(crate) genome_start: u64,
+    pub(crate) genome_end: u64,
 }
 
 impl WorkingTranscript {
@@ -774,8 +776,38 @@ fn stitch_align_to_transcript(
     scorer: &AlignmentScorer,
     cluster: &SeedCluster,
     junction_db: Option<&crate::junction::SpliceJunctionDb>,
+    align_mates_gap_max: u64,
 ) -> Option<WorkingTranscript> {
     let last_exon = wt.exons.last().unwrap();
+
+    // Mate-boundary detection: STAR canonSJ[iex] = -3 (stitchAlignToTranscript.cpp:402)
+    // When crossing from mate1 to mate2 (or vice versa), skip junction scoring and
+    // check alignMatesGapMax instead.
+    let last_mate = last_exon.mate_id;
+    let is_mate_boundary = wa.mate_id != last_mate && wa.mate_id != 2 && last_mate != 2;
+
+    if is_mate_boundary {
+        // Genome gap between mates (in forward SA coords)
+        let genome_gap = wa.genome_pos.saturating_sub(last_exon.genome_end);
+        if align_mates_gap_max > 0 && genome_gap > align_mates_gap_max {
+            return None;
+        }
+        let mut new_wt = wt.clone();
+        new_wt.exons.push(ExonBlock {
+            read_start: wa.read_pos,
+            read_end: wa.read_pos + wa.length,
+            genome_start: wa.sa_pos,
+            genome_end: wa.sa_pos + wa.length as u64,
+            mate_id: wa.mate_id,
+        });
+        new_wt.score += wa.length as i32;
+        new_wt.read_end = wa.read_pos + wa.length;
+        new_wt.genome_end = wa.sa_pos + wa.length as u64;
+        if wa.is_anchor {
+            new_wt.n_anchor += 1;
+        }
+        return Some(new_wt);
+    }
 
     // Overlap trimming: if new WA overlaps previous exon in read coords, shift start right
     let mut eff_read_pos = wa.read_pos;
@@ -989,12 +1021,11 @@ fn stitch_align_to_transcript(
                 last.read_end = (last.read_end as i64 + shared as i64 + jr_shift as i64) as usize;
                 last.genome_end = (last.genome_end as i64 + shared as i64 + jr_shift as i64) as u64;
             }
-        } else if shared > 0 {
-            if let Some(last) = new_wt.exons.last_mut() {
+        } else if shared > 0
+            && let Some(last) = new_wt.exons.last_mut() {
                 last.read_end += shared;
                 last.genome_end += shared as u64;
             }
-        }
 
         // New exon for B side
         let b_read_start = (eff_read_pos as i64 + jr_shift as i64) as usize;
@@ -1005,6 +1036,7 @@ fn stitch_align_to_transcript(
             read_end: b_read_start + b_len,
             genome_start: b_genome_start,
             genome_end: b_genome_start + b_len as u64,
+            mate_id: wa.mate_id,
         });
     } else {
         // Insertion: read_gap > genome_gap
@@ -1029,8 +1061,8 @@ fn stitch_align_to_transcript(
             // STAR: for (jR1=1; jR1<=gGap; jR1++)
             for jr1 in 1..=shared_usize {
                 let g_pos = last_exon.genome_end + (jr1 - 1) as u64 + genome_offset;
-                if let Some(gb) = index.genome.get_base(g_pos) {
-                    if gb < 4 {
+                if let Some(gb) = index.genome.get_base(g_pos)
+                    && gb < 4 {
                         // Pre-insertion read base (A side)
                         let r_pre = read_seq[last_exon.read_end + jr1 - 1];
                         // Post-insertion read base (B side, after ins gap)
@@ -1047,7 +1079,6 @@ fn stitch_align_to_transcript(
                             score1 += 1;
                         }
                     }
-                }
 
                 // STAR default (alignInsertionFlush=None): strict > only.
                 // First maximum wins = leftmost insertion in current coordinate space.
@@ -1070,8 +1101,8 @@ fn stitch_align_to_transcript(
                 };
                 let g_pos = last_exon.genome_end + (ii - 1) as u64 + genome_offset;
 
-                if let Some(gb) = index.genome.get_base(g_pos) {
-                    if gb < 4 && read_seq[r_idx] < 4 {
+                if let Some(gb) = index.genome.get_base(g_pos)
+                    && gb < 4 && read_seq[r_idx] < 4 {
                         if read_seq[r_idx] == gb {
                             d_score += 1;
                         } else {
@@ -1079,7 +1110,6 @@ fn stitch_align_to_transcript(
                             gap_mm += 1;
                         }
                     }
-                }
             }
         } else if shared < 0 {
             // Overlapping seeds on genome — reduce score
@@ -1094,12 +1124,11 @@ fn stitch_align_to_transcript(
 
         // Extend last exon by jr shared bases (A side)
         let jr_usize = jr.max(0) as usize;
-        if jr_usize > 0 {
-            if let Some(last) = new_wt.exons.last_mut() {
+        if jr_usize > 0
+            && let Some(last) = new_wt.exons.last_mut() {
                 last.read_end += jr_usize;
                 last.genome_end += jr_usize as u64;
             }
-        }
 
         // New exon after insertion
         // B read start: after extended A + insertion gap in read
@@ -1112,6 +1141,7 @@ fn stitch_align_to_transcript(
             read_end: eff_read_pos + eff_length,
             genome_start: b_genome_start,
             genome_end: eff_genome_pos + eff_length as u64,
+            mate_id: wa.mate_id,
         });
     }
 
@@ -1225,7 +1255,7 @@ fn blocks_overlap(t1_exons: &[ExonBlock], t2_exons: &[ExonBlock]) -> u32 {
 /// Convert a WorkingTranscript to a final Transcript by extending flanks,
 /// building CIGAR, counting mismatches, and converting to forward coordinates.
 #[allow(clippy::too_many_arguments)]
-fn finalize_transcript(
+pub(crate) fn finalize_transcript(
     wt: &WorkingTranscript,
     read_seq: &[u8],
     index: &GenomeIndex,
@@ -1236,6 +1266,13 @@ fn finalize_transcript(
 
     let alignment_start = wt.read_start;
     let alignment_end = wt.read_end;
+
+    // Guard: exon positions must be within read bounds. Out-of-bounds positions can
+    // arise when a combined PE read's WorkingTranscript has junction shifts that extend
+    // exon read_end past the individual mate boundary. Filter rather than underflow.
+    if alignment_end > read_seq.len() {
+        return None;
+    }
 
     // STAR: Lprev = tR2 - trA.rStart + 1 (current transcript length)
     let transcript_len = alignment_end - alignment_start;
@@ -1442,34 +1479,11 @@ fn finalize_transcript(
         .map(|op| op.len())
         .sum();
     if cigar_read_len != read_seq.len() as u32 {
-        panic!(
-            "[CIGAR-MISMATCH] cigar_read_len={} read_len={} left_ext={} right_ext={} align_start={} align_end={}\n  CIGAR: {}\n  Exon blocks ({}):\n{}",
-            cigar_read_len,
-            read_seq.len(),
-            left_extend.extend_len,
-            right_extend.extend_len,
-            alignment_start,
-            alignment_end,
-            final_cigar
-                .iter()
-                .map(|op| op.to_string())
-                .collect::<String>(),
-            wt.exons.len(),
-            wt.exons
-                .iter()
-                .enumerate()
-                .map(|(i, e)| format!(
-                    "    exon[{}]: read=[{}, {}), genome=[{}, {}), len={}",
-                    i,
-                    e.read_start,
-                    e.read_end,
-                    e.genome_start,
-                    e.genome_end,
-                    e.read_end - e.read_start
-                ))
-                .collect::<Vec<_>>()
-                .join("\n")
-        );
+        // Invalid CIGAR: exon block geometry is inconsistent with read length.
+        // This can occur when a combined PE read's WorkingTranscript has exon
+        // positions that span both mates or include the spacer region. Silently
+        // filter it out rather than panicking — the alignment is invalid.
+        return None;
     }
 
     // Adjusted genome start for left extension (raw SA coordinates)
@@ -1550,13 +1564,12 @@ fn finalize_transcript(
     // Merge consecutive exons
     let mut merged_exons: Vec<Exon> = Vec::new();
     for exon in exons {
-        if let Some(last_exon) = merged_exons.last_mut() {
-            if last_exon.genome_end == exon.genome_start && last_exon.read_end == exon.read_start {
+        if let Some(last_exon) = merged_exons.last_mut()
+            && last_exon.genome_end == exon.genome_start && last_exon.read_end == exon.read_start {
                 last_exon.genome_end = exon.genome_end;
                 last_exon.read_end = exon.read_end;
                 continue;
             }
-        }
         merged_exons.push(exon);
     }
 
@@ -1610,6 +1623,7 @@ fn stitch_recurse(
     max_transcripts: usize,
     transcripts: &mut Vec<WorkingTranscript>,
     recursion_count: &mut u32,
+    align_mates_gap_max: u64,
 ) {
     const MAX_RECURSION: u32 = 10_000;
 
@@ -1673,6 +1687,7 @@ fn stitch_recurse(
             read_end: wa.read_pos + wa.length,
             genome_start: wa.sa_pos,
             genome_end: wa.sa_pos + wa.length as u64,
+            mate_id: wa.mate_id,
         });
         new_wt.score = wa.length as i32;
         new_wt.read_start = wa.read_pos;
@@ -1696,12 +1711,20 @@ fn stitch_recurse(
             max_transcripts,
             transcripts,
             recursion_count,
+            align_mates_gap_max,
         );
     } else {
         // Try stitching this seed onto the existing transcript
-        if let Some(new_wt) =
-            stitch_align_to_transcript(&wt, wa, read_seq, index, scorer, cluster, junction_db)
-        {
+        if let Some(new_wt) = stitch_align_to_transcript(
+            &wt,
+            wa,
+            read_seq,
+            index,
+            scorer,
+            cluster,
+            junction_db,
+            align_mates_gap_max,
+        ) {
             stitch_recurse(
                 i_a + 1,
                 new_wt,
@@ -1715,6 +1738,7 @@ fn stitch_recurse(
                 max_transcripts,
                 transcripts,
                 recursion_count,
+                align_mates_gap_max,
             );
         }
     }
@@ -1745,6 +1769,7 @@ fn stitch_recurse(
             max_transcripts,
             transcripts,
             recursion_count,
+            align_mates_gap_max,
         );
     }
 }
@@ -1764,6 +1789,67 @@ pub(crate) fn stitch_seeds_with_jdb_debug(
     max_transcripts_per_window: usize,
     debug_read_name: &str,
 ) -> Result<Vec<Transcript>, Error> {
+    let (working_transcripts, stitch_cluster, stitch_is_reverse, stitch_read) =
+        stitch_seeds_core(cluster, read_seq, index, scorer, junction_db, max_transcripts_per_window, 0, debug_read_name)?;
+
+    // Finalize working transcripts → Transcript (filtering by overhang+repeat check)
+    let mut transcripts: Vec<Transcript> = Vec::with_capacity(working_transcripts.len());
+    for wt in &working_transcripts {
+        if let Some(mut transcript) =
+            finalize_transcript(wt, &stitch_read, index, scorer, &stitch_cluster)
+        {
+            // Restore original reverse-strand flag and read sequence for SAM output.
+            if stitch_is_reverse {
+                transcript.is_reverse = true;
+                transcript.read_seq = read_seq.to_vec();
+            }
+            transcripts.push(transcript);
+        }
+    }
+
+    // Sort by score descending, then shorter genomic span (STAR's gLength tiebreaker).
+    transcripts.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then((a.genome_end - a.genome_start).cmp(&(b.genome_end - b.genome_start)))
+    });
+    transcripts.truncate(max_transcripts_per_window);
+
+    Ok(transcripts)
+}
+
+/// PE-aware stitch: returns WorkingTranscripts before finalization, plus stitching context.
+///
+/// Returns `(working_transcripts, stitch_cluster, stitch_is_reverse, stitch_read)`.
+/// The caller is responsible for:
+/// - Finding mate boundaries with `find_mate_boundary()`
+/// - Splitting with `split_working_transcript()`
+/// - Finalizing each half with `finalize_transcript()`
+/// - Restoring `is_reverse` and `read_seq` on finalized transcripts as needed
+pub(crate) fn stitch_seeds_working(
+    cluster: &SeedCluster,
+    read_seq: &[u8],
+    index: &GenomeIndex,
+    scorer: &AlignmentScorer,
+    junction_db: Option<&crate::junction::SpliceJunctionDb>,
+    max_transcripts_per_window: usize,
+    align_mates_gap_max: u64,
+) -> Result<(Vec<WorkingTranscript>, SeedCluster, bool, Vec<u8>), Error> {
+    stitch_seeds_core(cluster, read_seq, index, scorer, junction_db, max_transcripts_per_window, align_mates_gap_max, "")
+}
+
+/// Shared core: preprocessing + recursive stitcher, returns working transcripts + context.
+#[allow(clippy::too_many_arguments)]
+fn stitch_seeds_core(
+    cluster: &SeedCluster,
+    read_seq: &[u8],
+    index: &GenomeIndex,
+    scorer: &AlignmentScorer,
+    junction_db: Option<&crate::junction::SpliceJunctionDb>,
+    max_transcripts_per_window: usize,
+    align_mates_gap_max: u64,
+    debug_read_name: &str,
+) -> Result<(Vec<WorkingTranscript>, SeedCluster, bool, Vec<u8>), Error> {
     let debug = !debug_read_name.is_empty();
 
     // Include ALL seeds (anchor and non-anchor) in the stitcher.
@@ -1843,21 +1929,19 @@ pub(crate) fn stitch_seeds_with_jdb_debug(
     // region. Without this, reverse-strand gap-fill scoring compares against genome
     // adjacent to the wrong seed, inflating false splice scores.
     let stitch_is_reverse = cluster.is_reverse;
-    let rc_read_storage: Vec<u8> = if cluster.is_reverse {
-        // RC the read: STAR uses Read1[1] (RC read) for reverse-strand stitching
+    // Always allocate an owned Vec so we can return it alongside the working transcripts.
+    // For forward clusters: clone read_seq (no RC needed).
+    // For reverse clusters: RC the read (STAR uses Read1[1] for reverse-strand stitching).
+    let stitch_read_owned: Vec<u8> = if cluster.is_reverse {
         read_seq
             .iter()
             .rev()
             .map(|&b| if b < 4 { 3 - b } else { b })
             .collect()
     } else {
-        Vec::new()
+        read_seq.to_vec()
     };
-    let stitch_read: &[u8] = if cluster.is_reverse {
-        &rc_read_storage
-    } else {
-        read_seq
-    };
+    let stitch_read: &[u8] = &stitch_read_owned;
 
     if cluster.is_reverse {
         // Convert WA entries to positive-strand read coords + forward genome coords
@@ -1890,7 +1974,7 @@ pub(crate) fn stitch_seeds_with_jdb_debug(
     }
 
     if wa_entries.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), stitch_cluster, stitch_is_reverse, stitch_read_owned));
     }
 
     if debug {
@@ -1932,6 +2016,7 @@ pub(crate) fn stitch_seeds_with_jdb_debug(
         max_transcripts_per_window,
         &mut working_transcripts,
         &mut recursion_count,
+        align_mates_gap_max,
     );
 
     if debug {
@@ -1943,34 +2028,148 @@ pub(crate) fn stitch_seeds_with_jdb_debug(
         );
     }
 
-    // Finalize working transcripts → Transcript (filtering by overhang+repeat check)
-    let mut transcripts: Vec<Transcript> = Vec::with_capacity(working_transcripts.len());
-    for wt in &working_transcripts {
-        if let Some(mut transcript) =
-            finalize_transcript(wt, stitch_read, index, scorer, &stitch_cluster)
-        {
-            // Restore original reverse-strand flag and read sequence for SAM output.
-            // The stitcher processed with is_reverse=false and RC read, but the final
-            // Transcript needs: is_reverse=true (for SAM FLAG) and original read_seq
-            // (SAM writer RC's it for display).
-            if stitch_is_reverse {
-                transcript.is_reverse = true;
-                transcript.read_seq = read_seq.to_vec();
-            }
-            transcripts.push(transcript);
+    Ok((working_transcripts, stitch_cluster, stitch_is_reverse, stitch_read_owned))
+}
+
+/// Find the index of the first exon with mate_id=1 (mate2) in a joint PE transcript.
+///
+/// Returns `Some(idx)` only when both mate0 and mate1 exons exist in `wt`.
+/// Returns `None` for SE transcripts (all mate_id=2) or single-mate clusters.
+pub(crate) fn find_mate_boundary(wt: &WorkingTranscript) -> Option<usize> {
+    let has_mate0 = wt.exons.iter().any(|e| e.mate_id == 0);
+    let has_mate1 = wt.exons.iter().any(|e| e.mate_id == 1);
+    if !has_mate0 || !has_mate1 {
+        return None;
+    }
+    wt.exons.iter().position(|e| e.mate_id == 1)
+}
+
+/// Split a joint PE WorkingTranscript at the mate boundary.
+///
+/// Exon read coordinates for mate2 are adjusted by `-(len1 + spacer_len)` to map back
+/// into mate2-local read space (0..len2). Genome coordinates are unchanged.
+///
+/// Returns `None` if the split produces invalid exon coordinates (e.g. mate2 exons
+/// with read positions below the spacer boundary, indicating the WT was built from
+/// combined-read seeds that don't cleanly separate at the mate boundary).
+pub(crate) fn split_working_transcript(
+    wt: &WorkingTranscript,
+    boundary_idx: usize,
+    len1: usize,
+    spacer_len: usize,
+) -> Option<(WorkingTranscript, WorkingTranscript)> {
+    let offset = len1 + spacer_len;
+
+    let mate1_exons: Vec<ExonBlock> = wt.exons[..boundary_idx].to_vec();
+
+    // Validate mate1 exons: read positions must be within [0, len1)
+    for e in &wt.exons[..boundary_idx] {
+        if e.read_end > len1 {
+            return None;
         }
     }
 
-    // Sort by score descending, then shorter genomic span (STAR's gLength tiebreaker).
-    // STAR: if (Score > maxScore || (Score == maxScore && gLength < gLength)) break;
-    transcripts.sort_by(|a, b| {
-        b.score
-            .cmp(&a.score)
-            .then((a.genome_end - a.genome_start).cmp(&(b.genome_end - b.genome_start)))
-    });
-    transcripts.truncate(max_transcripts_per_window);
+    // Validate mate2 exons: read_start >= offset (no underflow after adjustment)
+    for e in &wt.exons[boundary_idx..] {
+        if e.read_start < offset {
+            return None;
+        }
+    }
 
-    Ok(transcripts)
+    let mate2_exons: Vec<ExonBlock> = wt.exons[boundary_idx..]
+        .iter()
+        .map(|e| ExonBlock {
+            read_start: e.read_start - offset,
+            read_end: e.read_end.saturating_sub(offset),
+            genome_start: e.genome_start,
+            genome_end: e.genome_end,
+            mate_id: e.mate_id,
+        })
+        .collect();
+
+    let wt1 = WorkingTranscript {
+        read_start: mate1_exons.first().map(|e| e.read_start).unwrap_or(0),
+        read_end: mate1_exons.last().map(|e| e.read_end).unwrap_or(0),
+        genome_start: mate1_exons.first().map(|e| e.genome_start).unwrap_or(0),
+        genome_end: mate1_exons.last().map(|e| e.genome_end).unwrap_or(0),
+        exons: mate1_exons,
+        score: wt.score, // approximate — finalize_transcript recomputes
+        n_mismatch: wt.n_mismatch,
+        n_gap: wt.n_gap,
+        n_junction: wt.n_junction,
+        junction_motifs: wt.junction_motifs.clone(),
+        junction_annotated: wt.junction_annotated.clone(),
+        junction_shifts: wt.junction_shifts.clone(),
+        n_anchor: wt.n_anchor,
+    };
+
+    let wt2 = WorkingTranscript {
+        read_start: mate2_exons.first().map(|e| e.read_start).unwrap_or(0),
+        read_end: mate2_exons.last().map(|e| e.read_end).unwrap_or(0),
+        genome_start: mate2_exons.first().map(|e| e.genome_start).unwrap_or(0),
+        genome_end: mate2_exons.last().map(|e| e.genome_end).unwrap_or(0),
+        exons: mate2_exons,
+        score: wt.score, // approximate
+        n_mismatch: wt.n_mismatch,
+        n_gap: wt.n_gap,
+        n_junction: wt.n_junction,
+        junction_motifs: wt.junction_motifs.clone(),
+        junction_annotated: wt.junction_annotated.clone(),
+        junction_shifts: wt.junction_shifts.clone(),
+        n_anchor: wt.n_anchor,
+    };
+
+    Some((wt1, wt2))
+}
+
+/// Shift mate2-only WorkingTranscript read coords from combined-read space to mate2-local space.
+/// Combined-read positions [len1+spacer_len, ...) become [0, len2).
+/// Returns None if any exon's read_start < offset (invalid / would underflow).
+pub(crate) fn adjust_mate2_coords(
+    wt: &WorkingTranscript,
+    len1: usize,
+    spacer_len: usize,
+) -> Option<WorkingTranscript> {
+    let offset = len1 + spacer_len;
+    for e in &wt.exons {
+        if e.read_start < offset {
+            return None;
+        }
+    }
+    let mut adjusted = wt.clone();
+    for e in &mut adjusted.exons {
+        e.read_start -= offset;
+        e.read_end -= offset;
+    }
+    Some(adjusted)
+}
+
+/// Adjust read coordinates of a WorkingTranscript by subtracting `offset`.
+///
+/// Used to convert a single-mate-2 WorkingTranscript from combined-read space
+/// (positions len1+spacer_len .. len1+spacer_len+len2) to mate2-local space (0..len2).
+#[allow(dead_code)]
+pub(crate) fn adjust_wt_read_coords(wt: &WorkingTranscript, offset: usize) -> WorkingTranscript {
+    let adjusted_exons: Vec<ExonBlock> = wt
+        .exons
+        .iter()
+        .map(|e| ExonBlock {
+            read_start: e.read_start.saturating_sub(offset),
+            read_end: e.read_end.saturating_sub(offset),
+            genome_start: e.genome_start,
+            genome_end: e.genome_end,
+            mate_id: e.mate_id,
+        })
+        .collect();
+
+    WorkingTranscript {
+        read_start: wt.read_start.saturating_sub(offset),
+        read_end: wt.read_end.saturating_sub(offset),
+        genome_start: wt.genome_start,
+        genome_end: wt.genome_end,
+        exons: adjusted_exons,
+        ..wt.clone()
+    }
 }
 
 #[cfg(test)]
@@ -2080,6 +2279,7 @@ mod tests {
                 sa_pos: 100,
                 n_rep: 1,
                 is_anchor: true,
+                mate_id: 2,
             },
             WindowAlignment {
                 seed_idx: 1,
@@ -2089,6 +2289,7 @@ mod tests {
                 sa_pos: 50,
                 n_rep: 1,
                 is_anchor: true,
+                mate_id: 2,
             },
         ];
 

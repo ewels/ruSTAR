@@ -154,17 +154,14 @@ impl std::fmt::Display for OutSamType {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default)]
 pub enum OutSamUnmapped {
+    #[default]
     None,
     Within,
     WithinKeepPairs,
 }
 
-impl Default for OutSamUnmapped {
-    fn default() -> Self {
-        Self::None
-    }
-}
 
 impl std::str::FromStr for OutSamUnmapped {
     type Err = String;
@@ -183,16 +180,13 @@ impl std::str::FromStr for OutSamUnmapped {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default)]
 pub enum OutFilterType {
+    #[default]
     Normal,
     BySJout,
 }
 
-impl Default for OutFilterType {
-    fn default() -> Self {
-        Self::Normal
-    }
-}
 
 impl std::str::FromStr for OutFilterType {
     type Err = String;
@@ -210,16 +204,13 @@ impl std::str::FromStr for OutFilterType {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default)]
 pub enum TwopassMode {
+    #[default]
     None,
     Basic,
 }
 
-impl Default for TwopassMode {
-    fn default() -> Self {
-        Self::None
-    }
-}
 
 impl std::str::FromStr for TwopassMode {
     type Err = String;

@@ -257,6 +257,7 @@ mod tests {
                 sa_pos: genome_start,
                 n_rep: 1,
                 is_anchor: true,
+                mate_id: 2,
             }],
             chr_idx,
             genome_start,
