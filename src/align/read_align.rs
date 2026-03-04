@@ -846,6 +846,11 @@ pub fn align_paired_read(
                             continue;
                         }
 
+                        // Reject negative insert size (mate2 ends before mate1 starts)
+                        if t2.genome_end <= t1.genome_start {
+                            continue;
+                        }
+
                         let t1_ok = t1.score >= params.out_filter_score_min
                             && t1.score >= (params.out_filter_score_min_over_lread * lread1_m1) as i32
                             && t1.n_mismatch <= params.out_filter_mismatch_nmax
@@ -954,6 +959,11 @@ pub fn align_paired_read(
                     t1.read_seq = mate1_seq.to_vec();
 
                     if t1.chr_idx != t2.chr_idx {
+                        continue;
+                    }
+
+                    // Reject negative insert size (mate1 ends before mate2 starts)
+                    if t1.genome_end <= t2.genome_start {
                         continue;
                     }
 
