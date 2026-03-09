@@ -203,8 +203,10 @@ fn extend_alignment(
             score += 1;
             if score > max_score {
                 let total_mm = n_mm_prev + n_mm;
-                let record_limit = ((p_mm_max * (len_prev + i + 1) as f64) as u32).min(n_mm_max);
-                if total_mm <= record_limit {
+                // STAR uses double comparisons throughout (extendAlign.cpp)
+                let record_limit_f =
+                    (p_mm_max * (len_prev + i + 1) as f64).min(n_mm_max as f64);
+                if total_mm as f64 <= record_limit_f {
                     max_score = score;
                     best_len = i + 1;
                     best_mm = n_mm;
@@ -214,8 +216,10 @@ fn extend_alignment(
             // MISMATCH — check break BEFORE incrementing nMM (STAR behavior)
             // Break uses full extension length max_extend, not current position i+1
             let total_mm = n_mm_prev + n_mm;
-            let break_limit = ((p_mm_max * (len_prev + max_extend) as f64) as u32).min(n_mm_max);
-            if total_mm >= break_limit {
+            // STAR uses double comparisons throughout (extendAlign.cpp)
+            let break_limit_f =
+                (p_mm_max * (len_prev + max_extend) as f64).min(n_mm_max as f64);
+            if total_mm as f64 >= break_limit_f {
                 break;
             }
             n_mm += 1;
@@ -1292,6 +1296,7 @@ pub(crate) fn finalize_transcript(
     index: &GenomeIndex,
     scorer: &AlignmentScorer,
     cluster: &SeedCluster,
+    original_is_reverse: bool,
 ) -> Option<Transcript> {
     use crate::align::transcript::Exon;
 
@@ -1308,53 +1313,60 @@ pub(crate) fn finalize_transcript(
     // STAR: Lprev = tR2 - trA.rStart + 1 (current transcript length)
     let transcript_len = alignment_end - alignment_start;
 
-    // Extend alignment into flanking regions (STAR-style extendAlign)
-    // STAR passes trA.nMM as nMMprev for both extensions
-    let left_extend = if alignment_start > 0 {
-        extend_alignment(
-            read_seq,
-            alignment_start,
-            wt.genome_start,
-            -1,
-            alignment_start,
-            wt.n_mismatch,  // STAR: trA.nMM (accumulated transcript mismatches)
-            transcript_len, // STAR: tR2-trA.rStart+1 (current transcript length)
-            scorer.n_mm_max,
-            scorer.p_mm_max,
-            index,
-            cluster.is_reverse,
-        )
-    } else {
-        ExtendResult {
-            extend_len: 0,
-            max_score: 0,
-            n_mismatch: 0,
-        }
-    };
+    // Extend alignment into flanking regions (STAR-style extendAlign).
+    // STAR EXTEND_ORDER=1 (stitchWindowAligns.cpp): extend the 5' end of the read first.
+    //   Forward strand (original_is_reverse=false): 5' = left (start) → extend left first.
+    //   Reverse strand (original_is_reverse=true):  5' = right (end)  → extend right first.
+    // After Phase 16.27, stitch_cluster.is_reverse=false for all clusters, so original_is_reverse
+    // must be passed explicitly to recover the correct extension order.
+    let zero_extend = ExtendResult { extend_len: 0, max_score: 0, n_mismatch: 0 };
 
-    // After left extension, STAR updates trA.nMM and transcript length
-    let transcript_len_after_left = transcript_len + left_extend.extend_len;
-
-    let right_extend = if alignment_end < read_seq.len() {
-        extend_alignment(
-            read_seq,
-            alignment_end,
-            wt.genome_end,
-            1,
-            read_seq.len() - alignment_end,
-            wt.n_mismatch + left_extend.n_mismatch, // STAR: trA.nMM (after left ext)
-            transcript_len_after_left,              // STAR: tR2-trA.rStart+1 (after left ext)
-            scorer.n_mm_max,
-            scorer.p_mm_max,
-            index,
-            cluster.is_reverse,
-        )
+    let (left_extend, right_extend) = if !original_is_reverse {
+        // Forward: extend left (5') first, then right (3')
+        let left = if alignment_start > 0 {
+            extend_alignment(
+                read_seq, alignment_start, wt.genome_start, -1, alignment_start,
+                wt.n_mismatch, transcript_len,
+                scorer.n_mm_max, scorer.p_mm_max, index, cluster.is_reverse,
+            )
+        } else {
+            zero_extend.clone()
+        };
+        let transcript_len_after_first = transcript_len + left.extend_len;
+        let right = if alignment_end < read_seq.len() {
+            extend_alignment(
+                read_seq, alignment_end, wt.genome_end, 1,
+                read_seq.len() - alignment_end,
+                wt.n_mismatch + left.n_mismatch, transcript_len_after_first,
+                scorer.n_mm_max, scorer.p_mm_max, index, cluster.is_reverse,
+            )
+        } else {
+            zero_extend.clone()
+        };
+        (left, right)
     } else {
-        ExtendResult {
-            extend_len: 0,
-            max_score: 0,
-            n_mismatch: 0,
-        }
+        // Reverse: extend right (5') first, then left (3')
+        let right = if alignment_end < read_seq.len() {
+            extend_alignment(
+                read_seq, alignment_end, wt.genome_end, 1,
+                read_seq.len() - alignment_end,
+                wt.n_mismatch, transcript_len,
+                scorer.n_mm_max, scorer.p_mm_max, index, cluster.is_reverse,
+            )
+        } else {
+            zero_extend.clone()
+        };
+        let transcript_len_after_first = transcript_len + right.extend_len;
+        let left = if alignment_start > 0 {
+            extend_alignment(
+                read_seq, alignment_start, wt.genome_start, -1, alignment_start,
+                wt.n_mismatch + right.n_mismatch, transcript_len_after_first,
+                scorer.n_mm_max, scorer.p_mm_max, index, cluster.is_reverse,
+            )
+        } else {
+            zero_extend
+        };
+        (left, right)
     };
 
     // STAR finalization check: exon lengths including repeat lengths (shiftSJ)
@@ -1827,7 +1839,7 @@ pub(crate) fn stitch_seeds_with_jdb_debug(
     let mut transcripts: Vec<Transcript> = Vec::with_capacity(working_transcripts.len());
     for wt in &working_transcripts {
         if let Some(mut transcript) =
-            finalize_transcript(wt, &stitch_read, index, scorer, &stitch_cluster)
+            finalize_transcript(wt, &stitch_read, index, scorer, &stitch_cluster, stitch_is_reverse)
         {
             // Restore original reverse-strand flag and read sequence for SAM output.
             if stitch_is_reverse {

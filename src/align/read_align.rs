@@ -35,6 +35,11 @@ pub struct PairedAlignment {
     pub is_proper_pair: bool,
     /// Signed insert size (TLEN) - genomic distance between mate starts
     pub insert_size: i32,
+    /// Pre-finalization combined-read stitching score (wt.score before split_working_transcript).
+    /// Used for multi-mapper score-range ranking — matches STAR's combined-read score approach,
+    /// which is consistent across duplicate loci. Post-finalization per-mate scores diverge due
+    /// to independent extension into soft-clip regions.
+    pub combined_wt_score: i32,
 }
 
 /// Result of paired-end alignment, covering all mapping outcomes.
@@ -704,6 +709,7 @@ pub fn align_paired_read(
                         if wt.score < combined_score_threshold {
                             continue;
                         }
+                        let combined_wt_score = wt.score;
 
                         // Joint: split at mate1→mate2 boundary
                         let (wt1, wt2) = match split_working_transcript(
@@ -742,13 +748,13 @@ pub fn align_paired_read(
                         }
 
                         let t1 = match finalize_transcript(
-                            &wt1, mate1_seq, index, &scorer, &stitch_cluster,
+                            &wt1, mate1_seq, index, &scorer, &stitch_cluster, false,
                         ) {
                             Some(t) => t,
                             None => continue,
                         };
                         let mut t2 = match finalize_transcript(
-                            &wt2, &rc_mate2, index, &scorer, &stitch_cluster,
+                            &wt2, &rc_mate2, index, &scorer, &stitch_cluster, false,
                         ) {
                             Some(t) => t,
                             None => continue,
@@ -788,6 +794,7 @@ pub fn align_paired_read(
                             mate2_region: (0, len2),
                             is_proper_pair,
                             insert_size,
+                            combined_wt_score,
                         });
                     }
                     None => {
@@ -796,7 +803,7 @@ pub fn align_paired_read(
                         match mate {
                             Some(0) => {
                                 if let Some(t) = finalize_transcript(
-                                    &wt, mate1_seq, index, &scorer, &stitch_cluster,
+                                    &wt, mate1_seq, index, &scorer, &stitch_cluster, false,
                                 ) {
                                     mate1_candidates.push(t);
                                 }
@@ -805,7 +812,7 @@ pub fn align_paired_read(
                                 // Positions [len1+1, ..] → adjust to [0, len2)
                                 if let Some(wt2) = adjust_mate2_coords(&wt, len1, SPACER_LEN)
                                     && let Some(mut t) = finalize_transcript(
-                                        &wt2, &rc_mate2, index, &scorer, &stitch_cluster,
+                                        &wt2, &rc_mate2, index, &scorer, &stitch_cluster, false,
                                     )
                                 {
                                     t.is_reverse = true;
@@ -852,6 +859,7 @@ pub fn align_paired_read(
                     if wt.score < combined_score_threshold {
                         continue;
                     }
+                    let combined_wt_score = wt.score;
 
                     // Build wt2 (mate2 portion, no position adjustment needed)
                     let (wt2, wt1) = match split_working_transcript(
@@ -890,13 +898,13 @@ pub fn align_paired_read(
                     }
 
                     let t2 = match finalize_transcript(
-                        &wt2, mate2_seq, index, &scorer, &stitch_cluster,
+                        &wt2, mate2_seq, index, &scorer, &stitch_cluster, cluster_is_reverse,
                     ) {
                         Some(t) => t,
                         None => continue,
                     };
                     let mut t1 = match finalize_transcript(
-                        &wt1, &rc_mate1, index, &scorer, &stitch_cluster,
+                        &wt1, &rc_mate1, index, &scorer, &stitch_cluster, cluster_is_reverse,
                     ) {
                         Some(t) => t,
                         None => continue,
@@ -936,6 +944,7 @@ pub fn align_paired_read(
                         mate2_region: (0, len2),
                         is_proper_pair,
                         insert_size,
+                        combined_wt_score,
                     });
                 } else if has_mate2_exons && !has_mate1_exons {
                     // Mate2-only: all exons in [0, len2) → finalize with mate2_seq
@@ -943,7 +952,7 @@ pub fn align_paired_read(
                         continue;
                     }
                     if let Some(t) = finalize_transcript(
-                        &wt, mate2_seq, index, &scorer, &stitch_cluster,
+                        &wt, mate2_seq, index, &scorer, &stitch_cluster, cluster_is_reverse,
                     ) {
                         mate2_candidates.push(t);
                     }
@@ -951,7 +960,7 @@ pub fn align_paired_read(
                     // Mate1-only: all exons in [len2+1, ..] → adjust to [0, len1), finalize with rc_mate1
                     if let Some(wt1) = adjust_mate2_coords(&wt, len2, SPACER_LEN)
                         && let Some(mut t) = finalize_transcript(
-                            &wt1, &rc_mate1, index, &scorer, &stitch_cluster,
+                            &wt1, &rc_mate1, index, &scorer, &stitch_cluster, cluster_is_reverse,
                         )
                     {
                         t.is_reverse = true;
@@ -966,9 +975,10 @@ pub fn align_paired_read(
     if debug_pe {
         eprintln!("[DEBUG-PE] After cluster loop: joint_pairs={}, mate1_cands={}, mate2_cands={}", joint_pairs.len(), mate1_candidates.len(), mate2_candidates.len());
         for (i, pa) in joint_pairs.iter().enumerate() {
-            eprintln!("  pair[{}]: M1 chr={} pos={} rev={} score={} | M2 chr={} pos={} rev={} score={}",
+            eprintln!("  pair[{}]: M1 chr={} pos={} rev={} score={} | M2 chr={} pos={} rev={} score={} | wt_score={}",
                 i, pa.mate1_transcript.chr_idx, pa.mate1_transcript.genome_start, pa.mate1_transcript.is_reverse, pa.mate1_transcript.score,
-                pa.mate2_transcript.chr_idx, pa.mate2_transcript.genome_start, pa.mate2_transcript.is_reverse, pa.mate2_transcript.score);
+                pa.mate2_transcript.chr_idx, pa.mate2_transcript.genome_start, pa.mate2_transcript.is_reverse, pa.mate2_transcript.score,
+                pa.combined_wt_score);
         }
     }
 
@@ -1019,12 +1029,14 @@ pub fn align_paired_read(
             })
     });
     if !joint_pairs.is_empty() {
-        let best_score = joint_pairs[0].mate1_transcript.score
-            + joint_pairs[0].mate2_transcript.score;
+        // Use the pre-finalization combined-read stitching score for multi-mapper ranking.
+        // STAR's ReadAlign_multMapSelect uses the combined-read score (before per-mate extension),
+        // which is consistent across duplicate loci. Post-finalization per-mate scores diverge
+        // due to independent extension into different genomic flanking sequences (e.g., II vs IV
+        // segmental duplicates score differently after finalize_transcript, causing false NH=1).
+        let best_score = joint_pairs[0].combined_wt_score;
         let score_threshold = best_score - params.out_filter_multimap_score_range;
-        joint_pairs.retain(|pa| {
-            pa.mate1_transcript.score + pa.mate2_transcript.score >= score_threshold
-        });
+        joint_pairs.retain(|pa| pa.combined_wt_score >= score_threshold);
     }
     filter_paired_transcripts(&mut joint_pairs, params);
 
@@ -1706,6 +1718,7 @@ mod tests {
             mate2_region: (0, 100),
             is_proper_pair: true,
             insert_size: 200,
+            combined_wt_score: 0,
         }));
         assert!(matches!(both, PairedAlignmentResult::BothMapped(_)));
 

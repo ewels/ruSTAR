@@ -86,28 +86,25 @@ A read is counted as a **match** only if it aligns to the exact same chromosome,
 
 | Result | Count | % |
 |--------|-------|---|
-| Exact match (chr + pos + CIGAR identical) | 8792 | 98.49% |
+| Exact match (chr + pos + CIGAR identical) | 8799 | 98.57% |
 | Splice match (chr + pos + introns match, CIGAR differs) | 1 | 0.01% |
-| **Total match** | **8793** | **98.50%** |
-| Mismatch — unavoidable tie-breaking | 127 | 1.42% |
-| Mismatch — fixable algorithm differences | 7 | 0.08% |
-| **Parity (excluding unavoidable ties)** | **8920 / 8927** | **99.92%** |
+| **Total match** | **8800** | **98.57%** |
+| Mismatch — unavoidable tie-breaking | 126 | 1.41% |
+| Mismatch — fixable algorithm differences | 27 | 0.30% |
+| **Parity (excluding unavoidable ties)** | **8800 / 8827** | **99.69%** |
 
 #### Mismatch Classification
 
 | Category | Count | Fixable? |
 |----------|-------|----------|
 | Diff chromosome, both multi-mapper (repeat copy tie-breaking) | 100 | No — same score, different copy chosen |
-| Same chr, identical CIGAR, different position (repeat copy tie-breaking) | 21 | No — same score, different copy chosen |
-| Same chr, same score, different intron at repeat locus | 4 | No — same AS/NH, tiebreaking only |
-| Same chr, same splice, position differs 3–4 bp (soft-clip boundary) | 2 | No — same AS/NH, different soft-clip split |
-| Same chr + pos, different splice junctions | 4 | Partial (2 missed splices + 1 jR scan off-by-4bp + 1 STAR false splice) |
+| Same chr, identical CIGAR, different position (repeat copy tie-breaking) | ~19 | No — same score, different copy chosen |
+| Same chr + pos, different splice junctions | 4 | Partial |
 | Same chr, STAR spliced / ruSTAR not (missed splice) | 1 | Yes |
-| STAR mapped, ruSTAR unmapped | 1 | Maybe (high-mismatch read, NM=10) |
 | ruSTAR mapped, STAR unmapped (false splice) | 1 | Yes (adapter contamination → 279 kb intron) |
-| **Total mismatches** | **134** | |
+| MAPQ inflation / deflation | 7 | Partial |
 
-> **Unavoidable ties (127 reads):** Both tools find the same set of equally-scored alignments but choose different ones as primary due to internal processing order. Neither alignment is more correct than the other.
+> **Unavoidable ties (~119 reads):** Both tools find the same set of equally-scored alignments but choose different ones as primary due to internal processing order. Neither alignment is more correct than the other.
 
 > **STAR false splice (1 read):** ERR12389696.5825571 — STAR creates a 607 kb intron from adapter-contaminated bases, scoring 2 points higher than the correct soft-clipped alignment. ruSTAR correctly soft-clips this read.
 
@@ -123,13 +120,13 @@ A read is counted as a **match** only if it aligns to the exact same chromosome,
 
 | Metric | ruSTAR | STAR |
 |--------|--------|------|
-| Both mates mapped | 8382 (99.9%) | 8390 (100%) |
+| Both mates mapped | 8383 (99.9%) | 8390 (100%) |
 | Half-mapped pairs | 0 | 0 |
 | Unmapped pairs | 0 | 0 |
 | Per-mate position agreement | 98.3% | — |
-| Per-mate CIGAR agreement | 97.4% | — |
+| Per-mate CIGAR agreement | 97.5% | — |
 
-> **8-pair gap vs STAR**: ruSTAR uses STAR's combined-read PE path (`[mate1_fwd][SPACER][RC(mate2)]`), producing near-identical output. The remaining 8-pair difference stems from scoring edge cases in short-insert overlapping reads.
+> **7-pair gap vs STAR**: ruSTAR uses STAR's combined-read PE path (`[mate1_fwd][SPACER][RC(mate2)]`), producing near-identical output. The remaining 7-pair difference stems from scoring edge cases.
 
 ## Supported Features
 

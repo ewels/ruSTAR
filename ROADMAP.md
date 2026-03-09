@@ -49,7 +49,7 @@ Paired-end (Phase 8) builds on threaded infrastructure. GTF/junctions (Phase 7) 
 | 12 | Chimeric Detection | ✅ | 170 | SE chimeric, Chimeric.out.junction |
 | [13](docs/phase13_accuracy.md) | Performance + Accuracy | ✅ | 205 | 94.5% pos, 97.8% CIGAR, 2.1% splice |
 | [15](docs/phase15_sam_tags.md) | SAM Tags + PE Fix | ✅ | 235 | NH/HI/AS/NM/nM/XS/jM/jI/MD, PE fix |
-| [16](docs/phase16_algorithm.md) | Algorithm Parity | ✅* | 268 | SE: 99.7% pos, 2.2% splice, 28 actionable; PE: 8382/8390 (8-pair gap), 98.3% pos, 0 half-mapped |
+| [16](docs/phase16_algorithm.md) | Algorithm Parity | ✅* | 268 | SE: 99.7% pos, 2.2% splice, 27 actionable, 0 STAR-only; PE: 8383/8390 (7-pair gap), 98.3% pos, 0 half-mapped |
 | [17](docs/phase17_features.md) | Features + Polish | ✅* | 268 | Log.final.out, clippy cleanup, sorted BAM planned |
 | 14 | STARsolo | DEFERRED | — | Waiting for accuracy parity |
 
@@ -180,35 +180,36 @@ See [docs/phase15_sam_tags.md](docs/phase15_sam_tags.md) for detailed sub-phase 
 
 See [docs/phase16_algorithm.md](docs/phase16_algorithm.md) for sub-phase notes (16.1-16.13), [docs/phase16_14_nstart_fix.md](docs/phase16_14_nstart_fix.md) for the Nstart fix.
 
-**Summary**: Bin-based windowing, pre-DP seed extension, MMP SA range narrowing, multi-transcript DP, recursive combinatorial stitcher, STAR-faithful scoring (scoreStitchSJshift removed), sparse bidirectional seed search with Nstart +1 fix, WALrec persistent threshold, post-jR shared base scoring, hierarchical SAindex lookup, nWA reset + overlap detection, coverage filter removal, Lread-1 filter fix, too-many-loci filter, mate rescue, SA range narrowing fix (find_mult_range + max_mappable_length), reverse-strand stitcher coordinate fix (RC read + forward genome coords), PE joint DP stitching via combined-read path, STAR-faithful PE architecture (no cross-product), combined-read score threshold fix (pre-split check prevents double-counting).
+**Summary**: Bin-based windowing, pre-DP seed extension, MMP SA range narrowing, multi-transcript DP, recursive combinatorial stitcher, STAR-faithful scoring (scoreStitchSJshift removed), sparse bidirectional seed search with Nstart +1 fix, WALrec persistent threshold, post-jR shared base scoring, hierarchical SAindex lookup, nWA reset + overlap detection, coverage filter removal, Lread-1 filter fix, too-many-loci filter, mate rescue, SA range narrowing fix (find_mult_range + max_mappable_length), reverse-strand stitcher coordinate fix (RC read + forward genome coords), PE joint DP stitching via combined-read path, STAR-faithful PE architecture (no cross-product), combined-read score threshold fix (pre-split check prevents double-counting), extendAlign EXTEND_ORDER fix (5' of read first; reverse-strand reads extend right before left) + float comparison fix.
 
-**SE parity (10k yeast, strict match: same chr + exact pos + same splice junctions):**
+**SE parity (10k yeast, post Phase 16.28):**
 
 | Category | Count | % | Fixable? |
 |----------|-------|---|----------|
-| Exact match (chr + pos + CIGAR) | 8792 | 98.49% | — |
+| Exact match (chr + pos + CIGAR) | 8799 | 98.57% | — |
 | Splice match (chr + pos + introns, CIGAR differs) | 1 | 0.01% | — |
-| **Total match** | **8793** | **98.50%** | — |
-| Unavoidable ties (repeat copy tiebreaking, same score) | 127 | 1.42% | No |
-| Fixable algorithm differences | 7 | 0.08% | Yes |
-| **Parity excl. unavoidable ties** | **8920/8927** | **99.92%** | — |
+| **Total match** | **8800** | **98.57%** | — |
+| Unavoidable ties (repeat copy tiebreaking, same score) | 126 | 1.41% | No |
+| Fixable algorithm differences | 27 | 0.30% | Yes |
+| **Parity excl. unavoidable ties** | **8800/8827** | **99.69%** | — |
 
-**Adjusted SE summary (post Phase 16.26–16.27)**: 99.7% position agreement, 99.9% CIGAR, 2.2% splice rate (= STAR), 99.9% MAPQ, 28 actionable disagreements, 1 STAR-only / 1 ruSTAR-only.
+**Adjusted SE summary (post Phase 16.28)**: 99.7% position agreement, 99.9% CIGAR, 2.2% splice rate (= STAR), 99.9% MAPQ, 27 actionable disagreements, 0 STAR-only / 1 ruSTAR-only.
 
-**PE parity (10k yeast pairs, 150 bp, post Phase 16.11–16.12 + score fix):**
+**PE parity (10k yeast pairs, 150 bp, post Phase 16.28):**
 
 | Metric | ruSTAR | STAR |
 |--------|--------|------|
-| Both-mapped pairs | 8382 | 8390 |
+| Both-mapped pairs | 8383 | 8390 |
 | Half-mapped pairs | 0 | 0 |
-| Net gap | −8 | — |
+| Net gap | −7 | — |
 | Per-mate position agreement | 98.3% | — |
-| Per-mate CIGAR agreement | 97.4% | — |
+| Per-mate CIGAR agreement | 97.5% | — |
 
 **PE implementation path:**
 - Phase 16.11: STAR-faithful combined-read approach `[mate1_fwd][SPACER][RC(mate2)]`; `mate_id` tagging; `split_working_transcript`; overlap consistency checks (stitchWindowAligns.cpp checks 1+2)
 - Phase 16.12: Removed non-STAR independent SE + cross-product path; decision tree: joint pairs only → TooShort/unmapped
 - Score threshold fix: `split_working_transcript` copies `wt.score` to both halves; checking `wt1.score+wt2.score` doubled the threshold. Fixed to check `wt.score < combined_score_threshold` before split.
+- Phase 16.28: extendAlign EXTEND_ORDER fix — for reverse-strand alignments, extend right (5' of read) before left.
 
 **Remaining fixable SE issues (deferred):**
 
@@ -218,9 +219,8 @@ See [docs/phase16_algorithm.md](docs/phase16_algorithm.md) for sub-phase notes (
 | MAPQ inflation (missed splice/indel secondary) | 5 | Medium |
 | MAPQ deflation (extra unspliced secondary) | 2 | Medium |
 | ruSTAR false splice (adapter contamination, 279 kb) | 1 | Medium |
-| STAR-only (high-mismatch read, NM=10) | 1 | Unknown |
 
-**Remaining PE gap (8 pairs):** 155 ruSTAR-only false positives, 163 STAR-only missed. Short-insert overlapping reads where exact stitching scores differ slightly from STAR.
+**Remaining PE gap (7 pairs):** Cause TBD.
 
 ---
 
