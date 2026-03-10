@@ -666,8 +666,6 @@ pub fn align_paired_read(
         Some(&index.junction_db)
     };
 
-    let lread1_m1 = (len1 as f64) - 1.0;
-    let lread2_m1 = (len2 as f64) - 1.0;
     // STAR uses combined read length (len1+spacer+len2) as denominator for PE score threshold.
     // This is stricter than summing individual thresholds when they're computed separately.
     let combined_score_threshold =
@@ -768,20 +766,6 @@ pub fn align_paired_read(
 
                         // Reject negative insert size (mate2 ends before mate1 starts)
                         if t2.genome_end <= t1.genome_start {
-                            continue;
-                        }
-
-                        let t1_ok = t1.score >= params.out_filter_score_min
-                            && t1.score >= (params.out_filter_score_min_over_lread * lread1_m1) as i32
-                            && t1.n_mismatch <= params.out_filter_mismatch_nmax
-                            && (t1.n_mismatch as f64) <= params.out_filter_mismatch_nover_lmax * len1 as f64
-                            && t1.n_matched() >= params.out_filter_match_nmin;
-                        let t2_ok = t2.score >= params.out_filter_score_min
-                            && t2.score >= (params.out_filter_score_min_over_lread * lread2_m1) as i32
-                            && t2.n_mismatch <= params.out_filter_mismatch_nmax
-                            && (t2.n_mismatch as f64) <= params.out_filter_mismatch_nover_lmax * len2 as f64
-                            && t2.n_matched() >= params.out_filter_match_nmin;
-                        if !t1_ok || !t2_ok {
                             continue;
                         }
 
@@ -921,20 +905,6 @@ pub fn align_paired_read(
                         continue;
                     }
 
-                    let t1_ok = t1.score >= params.out_filter_score_min
-                        && t1.score >= (params.out_filter_score_min_over_lread * lread1_m1) as i32
-                        && t1.n_mismatch <= params.out_filter_mismatch_nmax
-                        && (t1.n_mismatch as f64) <= params.out_filter_mismatch_nover_lmax * len1 as f64
-                        && t1.n_matched() >= params.out_filter_match_nmin;
-                    let t2_ok = t2.score >= params.out_filter_score_min
-                        && t2.score >= (params.out_filter_score_min_over_lread * lread2_m1) as i32
-                        && t2.n_mismatch <= params.out_filter_mismatch_nmax
-                        && (t2.n_mismatch as f64) <= params.out_filter_mismatch_nover_lmax * len2 as f64
-                        && t2.n_matched() >= params.out_filter_match_nmin;
-                    if !t1_ok || !t2_ok {
-                        continue;
-                    }
-
                     let is_proper_pair = check_proper_pair(&t1, &t2, params);
                     let insert_size = calculate_insert_size(&t1, &t2);
                     joint_pairs.push(PairedAlignment {
@@ -1029,14 +999,16 @@ pub fn align_paired_read(
             })
     });
     if !joint_pairs.is_empty() {
-        // Use the pre-finalization combined-read stitching score for multi-mapper ranking.
-        // STAR's ReadAlign_multMapSelect uses the combined-read score (before per-mate extension),
-        // which is consistent across duplicate loci. Post-finalization per-mate scores diverge
-        // due to independent extension into different genomic flanking sequences (e.g., II vs IV
-        // segmental duplicates score differently after finalize_transcript, causing false NH=1).
-        let best_score = joint_pairs[0].combined_wt_score;
+        // Use post-finalization per-mate score sum (t1.score + t2.score) for the multi-mapper
+        // score-range filter. This matches STAR's stitchWindowAligns behavior: STAR applies the
+        // log-gap penalty (scoreGenomicLengthLog2scale) to the joint transcript score BEFORE
+        // checking the outFilterMultimapScoreRange threshold. Filtering by combined_wt_score
+        // (pre-log-gap) failed to reject false-splice joint pairs whose raw match count is high
+        // but whose post-penalty score is lower than the correct pair (e.g., a 439kb false intron
+        // loses 5 points vs the correct 150M's 2 points, which the raw wt.score doesn't capture).
+        let best_score = joint_pairs[0].mate1_transcript.score + joint_pairs[0].mate2_transcript.score;
         let score_threshold = best_score - params.out_filter_multimap_score_range;
-        joint_pairs.retain(|pa| pa.combined_wt_score >= score_threshold);
+        joint_pairs.retain(|pa| pa.mate1_transcript.score + pa.mate2_transcript.score >= score_threshold);
     }
     filter_paired_transcripts(&mut joint_pairs, params);
 
@@ -1096,50 +1068,43 @@ fn calculate_insert_size(mate1_trans: &Transcript, mate2_trans: &Transcript) -> 
 }
 
 /// Filter paired transcripts by quality thresholds.
-/// Each mate is checked independently against per-read thresholds.
-/// Combined score uses sum of both mates.
+/// STAR's mappedFilter (ReadAlign_mappedFilter.cpp) applies ALL quality checks to the combined
+/// read as a single unit (Lread = len1+1+len2). There are no per-mate quality filters for PE.
 fn filter_paired_transcripts(paired_alns: &mut Vec<PairedAlignment>, params: &Parameters) {
     paired_alns.retain(|pa| {
         let t1 = &pa.mate1_transcript;
         let t2 = &pa.mate2_transcript;
         let mate1_len = (pa.mate1_region.1 - pa.mate1_region.0) as f64;
         let mate2_len = (pa.mate2_region.1 - pa.mate2_region.0) as f64;
+        // Lread-1 for the combined read: (len1+1+len2) - 1 = len1 + len2
+        let combined_lread_m1 = mate1_len + mate2_len;
 
-        // Check each mate independently for per-read thresholds
-        // STAR uses (Lread-1) for relative thresholds and casts to integer
-        for (t, read_len) in [(t1, mate1_len), (t2, mate2_len)] {
-            let lread_m1 = read_len - 1.0;
+        let combined_score = t1.score + t2.score;
+        let combined_nm = t1.n_mismatch + t2.n_mismatch;
+        let combined_match = t1.n_matched() + t2.n_matched();
 
-            // Absolute score threshold (per mate)
-            if t.score < params.out_filter_score_min {
-                return false;
-            }
+        // Score: trBest->maxScore < outFilterScoreMin || < outFilterScoreMinOverLread*(Lread-1)
+        if combined_score < params.out_filter_score_min
+            || combined_score < (params.out_filter_score_min_over_lread * combined_lread_m1) as i32
+        {
+            return false;
+        }
 
-            // Relative score threshold (per mate): STAR casts to intScore
-            if t.score < (params.out_filter_score_min_over_lread * lread_m1) as i32 {
-                return false;
-            }
+        // Match bases: trBest->nMatch < outFilterMatchNmin || < outFilterMatchNminOverLread*(Lread-1)
+        if combined_match < params.out_filter_match_nmin
+            || combined_match
+                < (params.out_filter_match_nmin_over_lread * combined_lread_m1) as u32
+        {
+            return false;
+        }
 
-            // Absolute mismatch count (per mate)
-            if t.n_mismatch > params.out_filter_mismatch_nmax {
-                return false;
-            }
-
-            // Relative mismatch count (per mate)
-            if (t.n_mismatch as f64) > params.out_filter_mismatch_nover_lmax * read_len {
-                return false;
-            }
-
-            // Absolute matched bases (per mate)
-            let n_matched = t.n_matched();
-            if n_matched < params.out_filter_match_nmin {
-                return false;
-            }
-
-            // Relative matched bases (per mate): STAR casts to uint
-            if n_matched < (params.out_filter_match_nmin_over_lread * lread_m1) as u32 {
-                return false;
-            }
+        // Mismatches: nMM > outFilterMismatchNmaxTotal || nMM/rLength > outFilterMismatchNoverLmax
+        // outFilterMismatchNmaxTotal = min(outFilterMismatchNmax, outFilterMismatchNoverReadLmax*(len1+len2))
+        if combined_nm > params.out_filter_mismatch_nmax
+            || (combined_nm as f64)
+                > params.out_filter_mismatch_nover_lmax * (mate1_len + mate2_len)
+        {
+            return false;
         }
 
         true

@@ -828,6 +828,8 @@ fn stitch_align_to_transcript(
             return None;
         }
         let mut new_wt = wt.clone();
+
+        // STAR lines 360, 383-386: add M2 seed length to score.
         new_wt.exons.push(ExonBlock {
             read_start: wa.read_pos,
             read_end: wa.read_pos + wa.length,
@@ -2130,13 +2132,22 @@ pub(crate) fn split_working_transcript(
         })
         .collect();
 
+    // Compute per-mate scores from exon lengths (scoreMatch=1 per matched base).
+    // Copying wt.score (the full joint score) to both halves inflates each half's score
+    // by the other mate's contribution, causing low-quality joint pairs (e.g., those with
+    // a spurious short anchor seed) to outscore correct pairs after the log-gap penalty.
+    // Using Σ(exon_length) correctly attributes each matched base to the mate that produced it.
+    // Gap-fill scores between seeds are omitted (small, typically 0 for canonical junctions).
+    let wt1_score: i32 = mate1_exons.iter().map(|e| (e.read_end - e.read_start) as i32).sum();
+    let wt2_score: i32 = mate2_exons.iter().map(|e| (e.read_end - e.read_start) as i32).sum();
+
     let wt1 = WorkingTranscript {
         read_start: mate1_exons.first().map(|e| e.read_start).unwrap_or(0),
         read_end: mate1_exons.last().map(|e| e.read_end).unwrap_or(0),
         genome_start: mate1_exons.first().map(|e| e.genome_start).unwrap_or(0),
         genome_end: mate1_exons.last().map(|e| e.genome_end).unwrap_or(0),
         exons: mate1_exons,
-        score: wt.score, // approximate — finalize_transcript recomputes
+        score: wt1_score,
         n_mismatch: wt.n_mismatch,
         n_gap: wt.n_gap,
         n_junction: wt.n_junction,
@@ -2152,7 +2163,7 @@ pub(crate) fn split_working_transcript(
         genome_start: mate2_exons.first().map(|e| e.genome_start).unwrap_or(0),
         genome_end: mate2_exons.last().map(|e| e.genome_end).unwrap_or(0),
         exons: mate2_exons,
-        score: wt.score, // approximate
+        score: wt2_score,
         n_mismatch: wt.n_mismatch,
         n_gap: wt.n_gap,
         n_junction: wt.n_junction,
