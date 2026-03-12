@@ -6,7 +6,7 @@ A Rust reimplementation of [STAR](https://github.com/alexdobin/STAR) (Spliced Tr
 
 ruSTAR aims to be a faithful port of STAR, matching the original behavior as closely as possible. It uses the same genome index format, accepts the same `--camelCase` command-line parameters, and produces compatible SAM/BAM output.
 
-**Current status**: End-to-end single-end and paired-end RNA-seq alignment with splice junction detection, two-pass mode, chimeric alignment detection, and multi-threaded parallel processing. 268 tests passing.
+**Current status**: End-to-end single-end and paired-end RNA-seq alignment with splice junction detection, two-pass mode, chimeric alignment detection, and multi-threaded parallel processing. 268 tests passing (264 unit + 4 integration).
 
 ## Quick Start
 
@@ -90,8 +90,8 @@ A read is counted as a **match** only if it aligns to the exact same chromosome,
 | Splice match (chr + pos + introns match, CIGAR differs) | 1 | 0.01% |
 | **Total match** | **8800** | **98.57%** |
 | Mismatch — unavoidable tie-breaking | 126 | 1.41% |
-| Mismatch — fixable algorithm differences | 27 | 0.30% |
-| **Parity (excluding unavoidable ties)** | **8800 / 8827** | **99.69%** |
+| Mismatch — fixable algorithm differences | 26 | 0.29% |
+| **Parity (excluding unavoidable ties)** | **8800 / 8826** | **99.70%** |
 
 #### Mismatch Classification
 
@@ -99,22 +99,21 @@ A read is counted as a **match** only if it aligns to the exact same chromosome,
 |----------|-------|----------|
 | Diff chromosome, both multi-mapper (repeat copy tie-breaking) | 100 | No — same score, different copy chosen |
 | Same chr, identical CIGAR, different position (repeat copy tie-breaking) | ~19 | No — same score, different copy chosen |
-| Same chr + pos, different splice junctions | 4 | Partial |
-| Same chr, STAR spliced / ruSTAR not (missed splice) | 1 | Yes |
-| ruSTAR mapped, STAR unmapped (false splice) | 1 | Yes (adapter contamination → 279 kb intron) |
-| MAPQ inflation / deflation | 7 | Partial |
+| Wrong intron choice (same chr, different large intron) | 4 | Partial |
+| ruSTAR false splice (adapter contamination, 279 kb intron) | 1 | Yes |
+| STAR-only mapped (high-mismatch read, NM=10) | 1 | Unknown |
+| MAPQ inflation (missed splice/indel secondary) | 4 | Partial |
+| MAPQ deflation (extra unspliced secondary) | 4 | Partial |
 
 > **Unavoidable ties (~119 reads):** Both tools find the same set of equally-scored alignments but choose different ones as primary due to internal processing order. Neither alignment is more correct than the other.
-
-> **STAR false splice (1 read):** ERR12389696.5825571 — STAR creates a 607 kb intron from adapter-contaminated bases, scoring 2 points higher than the correct soft-clipped alignment. ruSTAR correctly soft-clips this read.
 
 ### MAPQ Agreement (SE)
 
 | Metric | Value |
 |--------|-------|
 | MAPQ agreement (position-matched reads) | 99.9% |
-| MAPQ inflation (ruSTAR=255, STAR<255) | 5 reads |
-| MAPQ deflation (ruSTAR<255, STAR=255) | 2 reads |
+| MAPQ inflation (ruSTAR=255, STAR<255) | 4 reads |
+| MAPQ deflation (ruSTAR<255, STAR=255) | 4 reads |
 
 ### Paired-End (10k yeast read pairs, 150 bp)
 
@@ -126,7 +125,7 @@ A read is counted as a **match** only if it aligns to the exact same chromosome,
 | Per-mate position agreement | 98.3% | — |
 | Per-mate CIGAR agreement | 97.5% | — |
 
-> **7-pair gap vs STAR**: ruSTAR uses STAR's combined-read PE path (`[mate1_fwd][SPACER][RC(mate2)]`), producing near-identical output. The remaining 7-pair difference stems from scoring edge cases.
+> **7-pair gap vs STAR**: ruSTAR uses STAR's combined-read PE path (`[mate1_fwd][SPACER][RC(mate2)]`), producing near-identical output. The remaining 7-pair difference stems from scoring edge cases at the combined-read stitching level.
 
 ## Supported Features
 

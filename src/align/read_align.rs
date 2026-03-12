@@ -720,31 +720,6 @@ pub fn align_paired_read(
                             continue;
                         }
 
-                        // STAR stitchWindowAligns.cpp:189-218: overlap consistency checks.
-                        // When mates overlap in the genome, verify the overlap is consistent.
-                        // "Left mate" = mate1 (lower read number), "right mate" = mate2.
-                        // STAR applies these checks AFTER backward extension, where exons[0][EX_R] → 0.
-                        // We use 0 for the effective leftReadStart to match STAR's post-extension value.
-                        {
-                            let left_end = wt1.exons.last().unwrap().genome_end;
-                            let right_start = wt2.exons.first().unwrap().genome_start;
-                            if left_end > right_start {
-                                // Check 1: leftMateStart > rightMateStart + 0 (post-extension EX_R)
-                                let left_start = wt1.exons.first().unwrap().genome_start;
-                                if left_start > right_start {
-                                    continue;
-                                }
-                                // Check 2: leftMateEnd > rightMateEnd + nBasesMax
-                                // rightMateEnd = last_mate2_exon.genome_start + (len2 - last_mate2_exon.read_start)
-                                let last_m2 = wt2.exons.last().unwrap();
-                                let right_end =
-                                    last_m2.genome_start + (len2 - last_m2.read_start) as u64;
-                                if left_end > right_end {
-                                    continue;
-                                }
-                            }
-                        }
-
                         let t1 = match finalize_transcript(
                             &wt1, mate1_seq, index, &scorer, &stitch_cluster, false,
                         ) {
@@ -762,6 +737,35 @@ pub fn align_paired_read(
 
                         if t1.chr_idx != t2.chr_idx {
                             continue;
+                        }
+
+                        // STAR stitchWindowAligns.cpp:189-218: overlap consistency checks.
+                        // When mates overlap in the genome, verify the overlap is consistent.
+                        // STAR applies these AFTER backward extension (post-extension EX_G).
+                        // Check 1 uses the estimated post-extension genome_start of mate1:
+                        //   post_ext_start ≈ wt1.first.genome_start - wt1.first.read_start
+                        // (left extension fills in exactly read_start bases when full extension occurs).
+                        // This fixes short-insert pairs where raw genome_start > mate2.start due to
+                        // the mate1 left soft clip, which post-extension would align correctly.
+                        {
+                            let left_end = wt1.exons.last().unwrap().genome_end;
+                            let right_start = wt2.exons.first().unwrap().genome_start;
+                            if left_end > right_start {
+                                // Check 1: post-extension leftMateStart > rightMateStart
+                                let wt1_first = wt1.exons.first().unwrap();
+                                let left_start_ext = wt1_first.genome_start
+                                    .saturating_sub(wt1_first.read_start as u64);
+                                if left_start_ext > right_start {
+                                    continue;
+                                }
+                                // Check 2: leftMateEnd > rightMateEnd (estimated post right-extension)
+                                let last_m2 = wt2.exons.last().unwrap();
+                                let right_end =
+                                    last_m2.genome_start + (len2 - last_m2.read_start) as u64;
+                                if left_end > right_end {
+                                    continue;
+                                }
+                            }
                         }
 
                         // Reject negative insert size (mate2 ends before mate1 starts)
@@ -856,31 +860,6 @@ pub fn align_paired_read(
                         continue;
                     }
 
-                    // STAR stitchWindowAligns.cpp:189-218: overlap consistency checks.
-                    // In the reverse cluster: wt2 = MATE1 content (RC(mate1_fwd) seeds,
-                    // combined_pos [0,len1)); wt1 = MATE2 content (mate2_fwd seeds,
-                    // combined_pos [len2+SPACER,..)), adj by -(len2+SPACER_LEN) in split.
-                    // STAR applies these after backward extension where exons[0][EX_R] → 0.
-                    {
-                        let left_end = wt2.exons.last().unwrap().genome_end;
-                        let right_start = wt1.exons.first().unwrap().genome_start;
-                        if left_end > right_start {
-                            // Check 1: first_mate1.G > first_mate2.G + 0 (post-extension EX_R)
-                            let first_m1 = wt2.exons.first().unwrap();
-                            if first_m1.genome_start > right_start {
-                                continue;
-                            }
-                            // Check 2: last_mate1.G_end > last_mate2.G_start + (len1 - adj_read_start)
-                            // wt1.last.read_start is adj by -(len2+SPACER_LEN); len1-adj = Lread-combined_pos
-                            let last_m2 = wt1.exons.last().unwrap();
-                            let right_end = last_m2.genome_start
-                                + (len1 as u64).saturating_sub(last_m2.read_start as u64);
-                            if left_end > right_end {
-                                continue;
-                            }
-                        }
-                    }
-
                     let t2 = match finalize_transcript(
                         &wt2, mate2_seq, index, &scorer, &stitch_cluster, cluster_is_reverse,
                     ) {
@@ -898,6 +877,29 @@ pub fn align_paired_read(
 
                     if t1.chr_idx != t2.chr_idx {
                         continue;
+                    }
+
+                    // STAR stitchWindowAligns.cpp:189-218: overlap consistency checks.
+                    // In the reverse cluster: wt2 = mate2 content (left in genome for RF pairs),
+                    // wt1 = mate1 content (right in genome).
+                    // Applied pre-finalization using wt2/wt1 seed coords.
+                    {
+                        let left_end = wt2.exons.last().unwrap().genome_end;
+                        let right_start = wt1.exons.first().unwrap().genome_start;
+                        if left_end > right_start {
+                            // Check 1: left mate starts after right mate start → reject
+                            let first_left = wt2.exons.first().unwrap();
+                            if first_left.genome_start > right_start {
+                                continue;
+                            }
+                            // Check 2: left mate ends after estimated right mate end → reject
+                            let last_right = wt1.exons.last().unwrap();
+                            let right_end = last_right.genome_start
+                                + (len1 as u64).saturating_sub(last_right.read_start as u64);
+                            if left_end > right_end {
+                                continue;
+                            }
+                        }
                     }
 
                     // Reject negative insert size (mate1 ends before mate2 starts)

@@ -32,7 +32,7 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Status
 
-**268 tests passing, 0 clippy warnings.** SE: 99.7% position agreement (adjusted), 99.9% CIGAR (pos-agreeing), 2.2% splice rate (STAR: 2.2%), 67 shared junctions, 99.9% MAPQ agreement, 27 actionable disagreements, 0 STAR-only / 1 ruSTAR-only mapped. PE: 8383/8390 both-mapped (7-pair gap vs STAR), 0 half-mapped, 98.3% per-mate position agreement. See [ROADMAP.md](ROADMAP.md) for detailed phase tracking and [docs/](docs/) for per-phase notes.
+**268 tests passing, 0 clippy warnings.** SE: 99.7% position agreement (adjusted), 99.9% CIGAR (pos-agreeing), 2.2% splice rate (STAR: 2.2%), 67 shared junctions, 99.9% MAPQ agreement, 26 actionable disagreements, 1 STAR-only / 1 ruSTAR-only mapped. MAPQ inflation: 4, deflation: 4. PE: 8383/8390 both-mapped (7-pair gap vs STAR), 0 half-mapped, 98.3% per-mate position agreement. See [ROADMAP.md](ROADMAP.md) for detailed phase tracking and [docs/](docs/) for per-phase notes.
 
 ## Source Layout
 
@@ -128,18 +128,19 @@ predicates = "3"
 - Every phase uses differential testing against STAR where applicable
 - Test data tiers: synthetic micro-genome → chr22 → full human genome
 
-**Current test status**: 269/269 tests passing (265 unit + 4 integration), 0 clippy warnings
+**Current test status**: 268/268 tests passing (264 unit + 4 integration), 0 clippy warnings
 
 ## Known Issues — Disagreement Root Causes (10k SE yeast)
 
-126 total position disagreements, 27 actionable:
+126 total position disagreements, 26 actionable:
 
-1. **Diff-chr multi-mapper ties (100 reads)** — Same CIGAR/MAPQ, different positions in repeat copies (rDNA). **Unavoidable** without matching STAR's random seed.
+1. **Diff-chr multi-mapper ties (100 reads)** — Same CIGAR/MAPQ, different positions in repeat copies (rDNA). **Unavoidable** without matching STAR's internal SA iteration order.
 2. **Same-chr repeat ties (~19 reads)** — rDNA/segmental dup copies on XII and IV. Same CIGAR/MAPQ, different position. **Unavoidable.**
 3. **Wrong intron choice (4 reads)** — ruSTAR picks a different large intron than STAR (e.g., 170kb vs 84kb) at multi-mapping loci on VII/XV.
-4. **MAPQ inflation (5 reads)** — ruSTAR=255 (unique) when STAR finds an additional spliced or indel alternative.
-5. **MAPQ deflation (2 reads)** — ruSTAR generates extra unspliced secondary 1bp below the correct spliced primary.
-6. **Mapping-only (1 read)** — 1 ruSTAR-only (likely false splice with adapter contamination, 279kb intron). STAR-only fixed by Phase 16.28 extendAlign fix.
+4. **MAPQ inflation (4 reads)** — ruSTAR=255 (unique) when STAR finds an additional spliced or indel alternative that ruSTAR misses.
+5. **MAPQ deflation (4 reads)** — ruSTAR generates extra unspliced secondary that makes the primary multi-mapped. 2 pre-existing + 2 unmasked by Phase 16.29 scoring fix.
+6. **ruSTAR-only (1 read)** — `ERR12389696.18296181` false splice with adapter contamination, 279kb intron.
+7. **STAR-only (1 read)** — `ERR12389696.13766843` high-mismatch read (NM=10), not mapped by ruSTAR.
 
 See [ROADMAP.md](ROADMAP.md) and [docs/](docs/) for full issue tracking.
 

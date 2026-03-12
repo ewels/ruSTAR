@@ -322,21 +322,114 @@ Removed anchor fallback in `cluster_seeds()` (no longer needed with accurate SA 
 
 ---
 
-## Phase 16.11: PE Joint DP Stitching — NEXT
+## Phase 16.PE1: Recursive Combinatorial Stitcher ✅
 
-**Target**: 263 half-mapped pairs (2.9% of PE reads). STAR maps both mates via joint mate-aware DP in a shared genomic window with a fragment-length gap penalty. Currently ruSTAR handles these as half-mapped after independent mate alignment + rescue fail.
+**Problem**: Forward DP stitcher could not produce multiple valid transcripts from a window when seeds had multiple reasonable include/exclude combinations.
 
-**Why this over remaining SE issues**: The 7 remaining fixable SE disagreements are diminishing-returns territory (3 missed splices sharing a hard root cause of short exon + large intron, 1 jR scan 4bp, 1 false splice, 1 missed mapping). PE half-mapped affects 263 pairs = ~37× more reads. See ROADMAP.md "Remaining SE Fixable Issues" for the full analysis.
+**Fix**: Replaced forward DP with a recursive include/exclude stitcher (`stitch_recurse` in `stitch.rs`) modelled on STAR's `stitchWindowAligns`. For each WA entry, explores both INCLUDE branch (stitch onto current transcript via `stitch_align_to_transcript`) and EXCLUDE branch (skip entry). Deduplication via `blocks_overlap`: existing higher-scoring transcripts dominate subsets. Anchor constraint: the last anchor must appear in at least one transcript. MAX_RECURSION=10,000 limit prevents blowup on large windows.
 
-**Remaining SE fixable issues (deferred)**:
+**Files**: `src/align/stitch.rs`
 
-| Read | Issue | Difficulty |
-|------|-------|------------|
-| ERR12389696.8053640 | jR scan boundary off by 4 bp | Low |
-| ERR12389696.18296181 | ruSTAR false splice, 279 kb (adapter contamination) | Medium |
-| ERR12389696.8788548 | Missed splice: 127 kb intron, same start pos | High |
-| ERR12389696.12389135 | Missed splice: 38 kb intron → MAPQ inflation | High |
-| ERR12389696.5150933 | Missed splice: 58 kb intron, diff start pos | High |
-| ERR12389696.13766843 | STAR-only: high-mismatch read (NM=10) | Unknown |
+---
 
-The three missed splices are the hardest remaining class: short first exon + very large intron that the stitcher doesn't explore exhaustively enough. May become easier to address after PE joint DP work touches the stitcher.
+## Phase 16.PE2: PE Joint DP — Combined-Read Path ✅
+
+**Problem**: ruSTAR aligned each PE mate independently then tried to pair. 263 pairs half-mapped because one mate had no seeds — but the mate had seeds when combined with the other in the correct orientation.
+
+**STAR's approach**: Build a combined read `[mate1_fwd | SPACER=11 | RC(mate2_fwd)]`. Align it as a single SE read. The stitcher produces a joint transcript spanning both mates; split it at the mate boundary into two SAM records. RC(combined) = `[mate2_fwd | RC_SPACER | RC(mate1_fwd)]` — the "stitch read" for reverse clusters.
+
+**Key implementation details**:
+- `mate_id: u8` field added to `WindowAlignment` and `ExonBlock` (0=mate1, 1=mate2, 2=SE/untagged)
+- `assign_seed_mate_ids()` tags seeds by position in combined read
+- Mate-boundary gap handling in `stitch_align_to_transcript`: when crossing mates, skip junction scoring, check `alignMatesGapMax` instead
+- `split_working_transcript()`: splits joint WT at first mate1 exon, adjusts mate2 read coords by `-(len1 + SPACER_LEN)`
+- `find_mate_boundary()`: detects joint WT by requiring both mate0 and mate1 exons present
+
+**Score threshold**: `wt.score < 0.66 * (len1 + SPACER_LEN + len2 - 1)`. Check BEFORE `split_working_transcript` — the split copies `wt.score` to both halves, so checking `wt1.score + wt2.score` would double-count the threshold.
+
+**Files**: `src/align/stitch.rs`, `src/align/read_align.rs`
+
+---
+
+## Phase 16.PE3: PE STAR-Faithful Architecture Refactor ✅
+
+**Problem**: ruSTAR had a hybrid architecture: combined-read DP first, then independent SE alignment of each mate, then cross-product pairing. STAR only uses the combined-read path — no independent SE fallback, no cross-product. This produced ~426 false-positive BothMapped pairs.
+
+**Fix**: Removed Phase 2 (independent SE via `align_read()`) and cross-product entirely. Decision tree:
+1. Joint pairs from combined-read path → BothMapped
+2. Single-mate clusters → discarded (score < combined threshold)
+3. No joint pairs → TooShort / unmapped
+
+Note: `adjust_mate2_coords()` helper in `stitch.rs` shifts mate2-only WT coords from combined-read space `[len1+spacer, ...)` → mate2-local space `[0, len2)`.
+
+**Result**: false-positive BothMapped pairs eliminated. Both-mapped: 8612 → stabilised toward STAR's 8390.
+
+**Files**: `src/align/read_align.rs`, `src/align/stitch.rs`
+
+---
+
+## Phase 16.28: extendAlign EXTEND_ORDER + Float Comparison Fix ✅ (2026-03-11)
+
+**Problem 1** (EXTEND_ORDER): STAR's `extendAlign` uses `EXTEND_ORDER=1` — extends the 5' end of the **read** first. For forward reads, 5' = left (extend left first). For reverse-strand reads, 5' = **right** end (extend the rightmost coordinate first). ruSTAR always extended left first, so reverse-strand reads extended in the wrong direction.
+
+**STAR source** (`stitchWindowAligns.cpp` lines 23-33):
+```cpp
+uint vOrder[2];
+if (tR->Str==0) { vOrder[0]=0; vOrder[1]=1; } // fwd: extend left first
+else            { vOrder[0]=1; vOrder[1]=0; } // rev: extend right first
+```
+
+**Fix**: Added `original_is_reverse: bool` to `finalize_transcript`. When true, extend right before left. All callers updated: SE passes `stitch_is_reverse`; PE fwd cluster passes `false`; PE rev cluster passes `cluster_is_reverse`.
+
+**Problem 2** (float comparison): STAR uses `double` for mismatch limit: `min(pMMmax * double(Lprev+L), double(nMMmax))`. ruSTAR truncated to `u32` first, underestimating the limit when the product < 1.0 → premature break on very short extensions.
+
+**Fix**: Changed `extend_alignment()` to use `f64` throughout.
+
+**Impact**: SE +7 agreements (8793→8800), actionable 28→27, STAR-only 1→0. PE: 8382→8383 both-mapped.
+
+**Files**: `src/align/stitch.rs`
+
+---
+
+## Phase 16.29: STITCH-SJ Extended Right Range Fix ✅ (2026-03-12)
+
+**Problem**: When a junction shift `jr_shift > 0` but `jr_shift ≤ shared` (e.g., jr_shift=1, shared=2), read bases shifted into seed B territory at the donor side were NOT scored against the donor genome. The old condition `jr_shift > shared as i32` (1 > 2 = FALSE) completely missed this case.
+
+**Root cause**: ruSTAR's `jr_shift` is measured from the **end** of the shared region (at `r_a_end = last_exon.read_end + shared`), while STAR's `jR` is measured from the end of **seed A**. Therefore `STAR_jR = jr_shift + shared`. Extended right triggers when `STAR_jR > rGap` (= `shared`), i.e. `jr_shift > 0`, with `n_extra = STAR_jR - rGap = jr_shift`.
+
+**Old code**:
+```rust
+if jr_shift > shared as i32 {
+    let n_extra = (jr_shift - shared as i32) as usize;
+```
+
+**New code**:
+```rust
+if jr_shift > 0 {
+    let n_extra = jr_shift as usize;
+```
+
+**Example**: Read `ERR12389696.7850795` (CIGAR `1S48M9138N101M`, NM=2, GT-AG). Score was 144; STAR expects 142. With jr_shift=1, shared=2: read[48] was shifted to donor side but scored as a match (+1) instead of mismatch (−1) vs donor genome, net +2 error. After fix, score is 142 = correct.
+
+**Also reverted**: A previous session applied `transcript.score - 2 * n_junction` as a proxy workaround for the AS tag in `sam.rs`. With the real scoring fix, this workaround over-subtracts. Reverted all 3 occurrences back to `transcript.score`.
+
+**Impact**: MAPQ inflation 5→4, actionable disagreements 27→26. Two pre-existing MAPQ deflation cases now visible (ruSTAR correctly lowers primary score → extra unspliced secondary now within score-range threshold). MAPQ deflation 2→4.
+
+**Files**: `src/align/stitch.rs`, `src/io/sam.rs`
+
+---
+
+## Remaining SE Fixable Issues
+
+| Read | Issue | Count | Difficulty |
+|------|-------|-------|------------|
+| ERR12389696.18296181 | ruSTAR false splice, 279 kb (adapter contamination) | 1 | Medium |
+| ERR12389696.8788548 | Missed splice: 127 kb intron, same start pos | 1 | High |
+| ERR12389696.12389135 | Missed splice: 38 kb intron → MAPQ inflation | 1 | High |
+| ERR12389696.5150933 | Missed splice: 58 kb intron, diff start pos | 1 | High |
+| ERR12389696.13766843 | STAR-only: high-mismatch read (NM=10) | 1 | Unknown |
+| Wrong intron choice (same chr, different large intron) | Different intron | 4 | High |
+| MAPQ inflation (missed splice/indel secondary) | | 4 | Medium |
+| MAPQ deflation (extra unspliced secondary) | | 4 | Medium |
+
+**Unavoidable ties (~119 reads)**: Same score, different repeat copy chosen. Cannot be fixed without matching STAR's internal SA iteration order.

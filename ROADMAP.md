@@ -20,7 +20,9 @@ Phase 1 (CLI) ✅
                                                     └→ Phase 13.1-13.14 (perf+accuracy) ✅
                                                          └→ Phase 15.1-15.6 (SAM tags) ✅
                                                               └→ Phase 16.1-16.10+16.11b (algorithm parity) ✅
-                                                                   └→ Phase 16.14 (Nstart fix, 99.5% pos) ✅
+                                                                   └→ Phase 16.PE1-PE3 (recursive stitcher, PE joint DP, PE arch refactor) ✅
+                                                                        └→ Phase 16.14 (Nstart fix, 99.5% pos) ✅
+                                                                             └→ Phase 16.26-16.29 (SA range fix, rev-strand fix, extendAlign fix, STITCH-SJ fix) ✅
                                                               └→ Phase 17.1 (Log.final.out) ✅
                                                                    └→ Phase 17.2+ (features + polish)
                                                               └→ Phase 14 (STARsolo) [DEFERRED]
@@ -49,7 +51,7 @@ Paired-end (Phase 8) builds on threaded infrastructure. GTF/junctions (Phase 7) 
 | 12 | Chimeric Detection | ✅ | 170 | SE chimeric, Chimeric.out.junction |
 | [13](docs/phase13_accuracy.md) | Performance + Accuracy | ✅ | 205 | 94.5% pos, 97.8% CIGAR, 2.1% splice |
 | [15](docs/phase15_sam_tags.md) | SAM Tags + PE Fix | ✅ | 235 | NH/HI/AS/NM/nM/XS/jM/jI/MD, PE fix |
-| [16](docs/phase16_algorithm.md) | Algorithm Parity | ✅* | 268 | SE: 99.7% pos, 2.2% splice, 27 actionable, 0 STAR-only; PE: 8383/8390 (7-pair gap), 98.3% pos, 0 half-mapped |
+| [16](docs/phase16_algorithm.md) | Algorithm Parity | ✅* | 268 | SE: 99.7% pos, 2.2% splice, 26 actionable, 1 STAR-only; PE: 8383/8390 (7-pair gap), 98.3% pos, 0 half-mapped |
 | [17](docs/phase17_features.md) | Features + Polish | ✅* | 268 | Log.final.out, clippy cleanup, sorted BAM planned |
 | 14 | STARsolo | DEFERRED | — | Waiting for accuracy parity |
 
@@ -182,7 +184,7 @@ See [docs/phase16_algorithm.md](docs/phase16_algorithm.md) for sub-phase notes (
 
 **Summary**: Bin-based windowing, pre-DP seed extension, MMP SA range narrowing, multi-transcript DP, recursive combinatorial stitcher, STAR-faithful scoring (scoreStitchSJshift removed), sparse bidirectional seed search with Nstart +1 fix, WALrec persistent threshold, post-jR shared base scoring, hierarchical SAindex lookup, nWA reset + overlap detection, coverage filter removal, Lread-1 filter fix, too-many-loci filter, mate rescue, SA range narrowing fix (find_mult_range + max_mappable_length), reverse-strand stitcher coordinate fix (RC read + forward genome coords), PE joint DP stitching via combined-read path, STAR-faithful PE architecture (no cross-product), combined-read score threshold fix (pre-split check prevents double-counting), extendAlign EXTEND_ORDER fix (5' of read first; reverse-strand reads extend right before left) + float comparison fix.
 
-**SE parity (10k yeast, post Phase 16.28):**
+**SE parity (10k yeast, post Phase 16.29):**
 
 | Category | Count | % | Fixable? |
 |----------|-------|---|----------|
@@ -190,10 +192,10 @@ See [docs/phase16_algorithm.md](docs/phase16_algorithm.md) for sub-phase notes (
 | Splice match (chr + pos + introns, CIGAR differs) | 1 | 0.01% | — |
 | **Total match** | **8800** | **98.57%** | — |
 | Unavoidable ties (repeat copy tiebreaking, same score) | 126 | 1.41% | No |
-| Fixable algorithm differences | 27 | 0.30% | Yes |
-| **Parity excl. unavoidable ties** | **8800/8827** | **99.69%** | — |
+| Fixable algorithm differences | 26 | 0.29% | Yes |
+| **Parity excl. unavoidable ties** | **8800/8826** | **99.70%** | — |
 
-**Adjusted SE summary (post Phase 16.28)**: 99.7% position agreement, 99.9% CIGAR, 2.2% splice rate (= STAR), 99.9% MAPQ, 27 actionable disagreements, 0 STAR-only / 1 ruSTAR-only.
+**Adjusted SE summary (post Phase 16.29)**: 99.7% position agreement, 99.9% CIGAR, 2.2% splice rate (= STAR), 99.9% MAPQ, 26 actionable disagreements, 1 STAR-only / 1 ruSTAR-only. MAPQ inflation: 4 reads, MAPQ deflation: 4 reads.
 
 **PE parity (10k yeast pairs, 150 bp, post Phase 16.28):**
 
@@ -206,8 +208,9 @@ See [docs/phase16_algorithm.md](docs/phase16_algorithm.md) for sub-phase notes (
 | Per-mate CIGAR agreement | 97.5% | — |
 
 **PE implementation path:**
-- Phase 16.11: STAR-faithful combined-read approach `[mate1_fwd][SPACER][RC(mate2)]`; `mate_id` tagging; `split_working_transcript`; overlap consistency checks (stitchWindowAligns.cpp checks 1+2)
-- Phase 16.12: Removed non-STAR independent SE + cross-product path; decision tree: joint pairs only → TooShort/unmapped
+- Phase 16.PE1: Recursive combinatorial stitcher (`stitch_recurse`) replacing forward DP
+- Phase 16.PE2: STAR-faithful combined-read approach `[mate1_fwd][SPACER][RC(mate2)]`; `mate_id` tagging; `split_working_transcript`; overlap consistency checks
+- Phase 16.PE3: Removed non-STAR independent SE + cross-product path; decision tree: joint pairs only → TooShort/unmapped
 - Score threshold fix: `split_working_transcript` copies `wt.score` to both halves; checking `wt1.score+wt2.score` doubled the threshold. Fixed to check `wt.score < combined_score_threshold` before split.
 - Phase 16.28: extendAlign EXTEND_ORDER fix — for reverse-strand alignments, extend right (5' of read) before left.
 
@@ -216,11 +219,12 @@ See [docs/phase16_algorithm.md](docs/phase16_algorithm.md) for sub-phase notes (
 | Issue | Count | Difficulty |
 |-------|-------|------------|
 | Wrong intron choice (same chr, different large intron) | 4 | High |
-| MAPQ inflation (missed splice/indel secondary) | 5 | Medium |
-| MAPQ deflation (extra unspliced secondary) | 2 | Medium |
+| MAPQ inflation (missed splice/indel secondary) | 4 | Medium |
+| MAPQ deflation (extra unspliced secondary) | 4 | Medium |
 | ruSTAR false splice (adapter contamination, 279 kb) | 1 | Medium |
+| STAR-only mapped (high-mismatch read NM=10) | 1 | Unknown |
 
-**Remaining PE gap (7 pairs):** Cause TBD.
+**Remaining PE gap (7 pairs):** Cause TBD. Investigation needed at combined-read stitching level.
 
 ---
 
