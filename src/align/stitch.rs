@@ -791,6 +791,16 @@ fn stitch_align_to_transcript(
     let is_mate_boundary = wa.mate_id != last_mate && wa.mate_id != 2 && last_mate != 2;
 
     if is_mate_boundary {
+        // STAR allows at most ONE mate-boundary crossing per combined PE transcript.
+        // stitchAlignToTranscript.cpp returns -1000007/-1000008 for the 3rd+ seed when
+        // mates overlap (genome positions interleaved), naturally limiting WTs to 2 exons.
+        // ruSTAR's overlap-trimming allows continued stitching, inflating combined_n_match.
+        // Fix: if the WT already has exons from BOTH mates, a second crossing is invalid.
+        let has_m0 = wt.exons.iter().any(|e| e.mate_id == 0);
+        let has_m1 = wt.exons.iter().any(|e| e.mate_id == 1);
+        if has_m0 && has_m1 {
+            return None;
+        }
         // STAR condition (stitchAlignToTranscript.cpp:352):
         // gBstart + trA->exons[0][EX_R] + nBasesMax >= trA->exons[0][EX_G] || EX_G < EX_R
         // For forward clusters: checked in forward genome space.

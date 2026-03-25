@@ -51,7 +51,7 @@ Paired-end (Phase 8) builds on threaded infrastructure. GTF/junctions (Phase 7) 
 | 12 | Chimeric Detection | ✅ | 170 | SE chimeric, Chimeric.out.junction |
 | [13](docs/phase13_accuracy.md) | Performance + Accuracy | ✅ | 205 | 94.5% pos, 97.8% CIGAR, 2.1% splice |
 | [15](docs/phase15_sam_tags.md) | SAM Tags + PE Fix | ✅ | 235 | NH/HI/AS/NM/nM/XS/jM/jI/MD, PE fix |
-| [16](docs/phase16_algorithm.md) | Algorithm Parity | ✅* | 268 | SE: 99.7% pos, 2.2% splice, 26 actionable, 0 STAR-only; PE: 8295/8390 (−95 ruSTAR under), 32 FP (down from 144, Phase 16.31 overlap check fix), 127 STAR-only |
+| [16](docs/phase16_algorithm.md) | Algorithm Parity | ✅* | 268 | SE: 99.7% pos, 2.2% splice, 26 actionable, 0 STAR-only; PE: 8245/8390 (−145 ruSTAR under), 12 FP, 157 STAR-only (Phase 16.31: scoreGenomicLengthLog2scale penalty applied to combined PE WT score) |
 | [17](docs/phase17_features.md) | Features + Polish | ✅* | 268 | Log.final.out, clippy cleanup, sorted BAM planned |
 | 14 | STARsolo | DEFERRED | — | Waiting for accuracy parity |
 
@@ -197,17 +197,17 @@ See [docs/phase16_algorithm.md](docs/phase16_algorithm.md) for sub-phase notes (
 
 **Adjusted SE summary (post Phase 16.29)**: 99.7% position agreement, 99.9% CIGAR, 2.2% splice rate (= STAR), 99.9% MAPQ, 26 actionable disagreements, 1 STAR-only / 1 ruSTAR-only. MAPQ inflation: 4 reads, MAPQ deflation: 4 reads.
 
-**PE parity (10k yeast pairs, 150 bp, post palindromic-early-exit removal + D5):**
+**PE parity (10k yeast pairs, 150 bp, post Phase 16.31):**
 
 | Metric | ruSTAR | STAR |
 |--------|--------|------|
-| Both-mapped pairs | 8412 | 8390 |
+| Both-mapped pairs | 8245 | 8390 |
 | Half-mapped pairs | 0 | 0 |
-| Net gap | +22 (ruSTAR over) | — |
-| Per-mate position agreement | ~97.8% | — |
-| Per-mate CIGAR agreement | ~95.9% | — |
-| ruSTAR-only false positives | 144 | — |
-| STAR-only missed | 122 | — |
+| Net gap | −145 (ruSTAR under) | — |
+| Per-mate position agreement | ~98.0% | — |
+| Per-mate CIGAR agreement | ~96.7% | — |
+| ruSTAR-only false positives | 12 | — |
+| STAR-only missed | 157 | — |
 
 **PE implementation path:**
 - Phase 16.PE1: Recursive combinatorial stitcher (`stitch_recurse`) replacing forward DP
@@ -219,11 +219,13 @@ See [docs/phase16_algorithm.md](docs/phase16_algorithm.md) for sub-phase notes (
 - D5 (2026-03-12): Overlapping-mate junction consistency check (`pe_junctions_consistent`). Removed 2 false-positive pairs where splice junctions in the overlapping genome region disagreed between mates.
 - Palindromic early-exit removed (2026-03-16): `if mate1_seq == rc_mate2 { return TooShort }` was wrong — STAR maps palindromic zero-insert RF pairs. Recovered ~28 pairs.
 
-**PE false positives — root cause (confirmed 2026-03-19 via STAR debug tracing):**
+**Phase 16.31 (2026-03-25):** Applied `scoreGenomicLengthLog2scale` penalty to combined PE WT score before threshold check (`stitchWindowAligns.cpp:262-265`). `penalty = ceil(log2(gspan) * -0.25 - 0.5)`, typically -2. Reuses `scorer.genomic_length_penalty()`. Fixed 132/144 FPs (144->12). Created 35 new STAR-only misses (122->157) -- latent scoring discrepancy for borderline pairs.
 
-The 144 ruSTAR-only false positives are rejected by STAR's `outFilterMatchNminOverLread` check in `mappedFilter`, applied against the **combined read length** (`len1 + SPACER + len2`). Overlapping non-palindromic pairs only have ~130-150 matched bases (one mate's worth); the combined threshold = `0.66 × 310 = 205` → `unmapped=short`. ruSTAR's score threshold is applied correctly but the `nMatch` check against combined Lread is missing.
+**PE false positives -- updated status (2026-03-25):**
 
-**Fix**: After `split_working_transcript`, add: `if t1.n_match + t2.n_match < (0.66 * (combined_lread - 1) as f64) as i32 { reject }` in `read_align.rs`.
+Of the original 144 FPs, 132 were fixed by the `scoreGenomicLengthLog2scale` penalty (Phase 16.31). 12 FPs remain (higher pre-penalty scores >=200). 35 new STAR-only regressions: borderline pairs with raw scores ~198-200 that fall below threshold after penalty, while STAR's raw scores are marginally higher.
+
+**Remaining PE gap:** 12 ruSTAR-only false positives, 157 STAR-only missed (35 post-16.31 regressions + 122 pre-existing). See `docs/star_comparison/DIFFERENCES.md`.
 
 **Remaining fixable SE issues (deferred):**
 

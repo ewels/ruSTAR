@@ -695,14 +695,19 @@ pub fn align_paired_read(
                     Some(boundary_idx) => {
                         // STAR combined-read score filter (ReadAlign_mappedFilter.cpp line 8):
                         // trBest->maxScore < outFilterScoreMinOverLread * (Lread-1).
-                        // wt.score is the combined-read stitching score (before per-mate extension).
+                        // Apply scoreGenomicLengthLog2scale penalty (stitchWindowAligns.cpp:262-265)
+                        // before comparing to threshold. STAR stores Score=max(0,Score+penalty).
                         // Must check BEFORE split_working_transcript because split sets both
                         // wt1.score=wt.score and wt2.score=wt.score (approximations), and using
                         // wt1.score+wt2.score would double-count, inflating the effective score.
-                        if wt.score < combined_score_threshold {
+                        let g_span = wt.exons.last().unwrap().genome_end
+                            .saturating_sub(wt.exons.first().unwrap().genome_start);
+                        let length_penalty = scorer.genomic_length_penalty(g_span);
+                        let adjusted_score = (wt.score + length_penalty).max(0);
+                        if adjusted_score < combined_score_threshold {
                             continue;
                         }
-                        let combined_wt_score = wt.score;
+                        let combined_wt_score = adjusted_score;
                         // Pre-split combined-read coverage: mirrors STAR's nMatch on the joint
                         // combined transcript (used in mappedFilter). Sum of exon read spans
                         // before finalize_transcript inflates per-mate contributions.
@@ -841,7 +846,6 @@ pub fn align_paired_read(
                     if boundary_idx == 0 || boundary_idx == wt.exons.len() {
                         continue;
                     }
-
                     // Validate mate2 exons: all must fit within [0, len2)
                     if wt.exons[..boundary_idx].iter().any(|e| e.read_end > len2) {
                         continue;
@@ -851,13 +855,18 @@ pub fn align_paired_read(
                         continue;
                     }
 
-                    // STAR combined-read score filter: check wt.score before split.
+                    // STAR combined-read score filter: check adjusted score before split.
+                    // Apply scoreGenomicLengthLog2scale penalty (stitchWindowAligns.cpp:262-265).
                     // split_working_transcript sets wt1.score=wt.score and wt2.score=wt.score,
                     // so using wt1.score+wt2.score would double-count.
-                    if wt.score < combined_score_threshold {
+                    let g_span = wt.exons.last().unwrap().genome_end
+                        .saturating_sub(wt.exons.first().unwrap().genome_start);
+                    let length_penalty = scorer.genomic_length_penalty(g_span);
+                    let adjusted_score = (wt.score + length_penalty).max(0);
+                    if adjusted_score < combined_score_threshold {
                         continue;
                     }
-                    let combined_wt_score = wt.score;
+                    let combined_wt_score = adjusted_score;
                     // Pre-split combined-read coverage: mirrors STAR's nMatch on the joint
                     // combined transcript (used in mappedFilter). Stitch_read for reverse cluster
                     // is [mate2_fwd | SPACER_RC | RC(mate1_fwd)]; exon read spans cover same range.
@@ -1147,8 +1156,11 @@ fn filter_paired_transcripts(paired_alns: &mut Vec<PairedAlignment>, params: &Pa
         true
     });
 
-    // Limit to top N
-    paired_alns.truncate(params.out_filter_multimap_nmax as usize);
+    // STAR's mappedFilter: if nTr > outFilterMultimapNmax → unmapped=multi (clear all).
+    // Unlike SE which truncates for output, PE must REJECT the entire pair when over the limit.
+    if paired_alns.len() > params.out_filter_multimap_nmax as usize {
+        paired_alns.clear();
+    }
 }
 
 /// Extract splice junctions from a Transcript's CIGAR as (donor, acceptor) pairs.

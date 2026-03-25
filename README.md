@@ -119,13 +119,15 @@ A read is counted as a **match** only if it aligns to the exact same chromosome,
 
 | Metric | ruSTAR | STAR |
 |--------|--------|------|
-| Both mates mapped | 8383 (99.9%) | 8390 (100%) |
+| Both mates mapped | 8245 | 8390 |
 | Half-mapped pairs | 0 | 0 |
 | Unmapped pairs | 0 | 0 |
-| Per-mate position agreement | 98.3% | — |
-| Per-mate CIGAR agreement | 97.5% | — |
+| ruSTAR-only mapped pairs | 12 | — |
+| STAR-only mapped pairs | 157 | — |
+| Per-mate position agreement | 98.0% | — |
+| Per-mate CIGAR agreement | 96.7% | — |
 
-> **7-pair gap vs STAR**: ruSTAR uses STAR's combined-read PE path (`[mate1_fwd][SPACER][RC(mate2)]`), producing near-identical output. The remaining 7-pair difference stems from scoring edge cases at the combined-read stitching level.
+> **PE parity in progress**: ruSTAR uses STAR's combined-read PE path (`[mate1_fwd][SPACER][RC(mate2)]`). The 12 ruSTAR-only false positives are overlapping pairs with marginally elevated combined-read scores. The 157 STAR-only missed pairs include 35 where ruSTAR's raw stitching score is slightly below STAR's (exposed by the genomic-length score penalty added in Phase 16.31) and 122 pre-existing gaps under investigation.
 
 ## Supported Features
 
@@ -154,7 +156,7 @@ A read is counted as a **match** only if it aligns to the exact same chromosome,
 - No `--quantMode GeneCounts`
 - No `--outReadsUnmapped Fastx`
 - No `--outStd SAM/BAM` (stdout output)
-- Residual MAPQ inflation (5 reads in 10k SE benchmark) — missed splice/indel secondary alignments
+- Residual MAPQ inflation (4 reads in 10k SE benchmark) — missed splice/indel secondary alignments
 - No STARsolo single-cell features
 
 See [ROADMAP.md](ROADMAP.md) for detailed implementation tracking.
