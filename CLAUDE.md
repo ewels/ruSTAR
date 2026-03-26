@@ -144,18 +144,22 @@ predicates = "3"
 
 See [ROADMAP.md](ROADMAP.md) and [docs/](docs/) for full issue tracking.
 
-## PE False Positives — Root Cause (Confirmed 2026-03-19)
+## PE False Positives — Root Cause (Updated 2026-03-26)
 
-**144 ruSTAR-only false positives** are non-palindromic overlapping PE pairs rejected by STAR via `outFilterMatchNminOverLread` applied to the **combined read length**, not per-mate.
+**132/144 ruSTAR-only false positives** were fixed by Phase 16.31 (scoreGenomicLengthLog2scale penalty on combined WT score). **12 remain**.
 
-- STAR `Lread` for a PE combined read = `len1 + SPACER(11) + len2` ≈ 311 for 150bp reads
-- `outFilterMatchNminOverLread` default = 0.66 → threshold = `0.66 × 310 = 204.6 → 205` matched bases required
-- Overlapping false-positive pairs have `nMatch ≈ 130-150` (only one mate's worth) → fail `mappedFilter` → `unmapped=short`
-- ruSTAR's `combined_score_threshold = 0.66 × (len1 + SPACER + len2 - 1) = 198` is correct for the score, but `nMatch` filtering against the combined Lread is missing
+The 12 remaining FPs all share the same underlying issue: **ruSTAR's combined WT score is 36-106 points higher than STAR's finalized combined WT score** for these pairs, causing them to pass the combined_score_threshold (198) where STAR rejects them via `mappedFilter`.
 
-**Fix needed**: After `split_working_transcript`, check that `t1.n_match + t2.n_match >= 0.66 × (combined_Lread - 1)`. This is the `outFilterMatchNminOverLread` check on the combined read.
+**Root cause of score inflation (TBD)**: STAR's combined WT score at finalization includes extensions done inside `stitchAlignToTranscript` PE boundary processing and `stitchWindowAligns` finalize. ruSTAR's combined WT score includes only seeds (no extensions until per-mate `finalize_transcript`). Despite this, ruSTAR's pre-extension score (e.g., 205 for 9834570) exceeds STAR's post-extension score (167). This means ruSTAR must have MORE/DIFFERENT seeds scored in the combined WT, not just missing extensions.
 
-**Confirmed by**: STAR debug tracing (`test/debug_star.sh` + instrumented STAR at `/home/jamfer/Dropbox/Bioinformatics/tools/repos/STAR/source/STAR`). Example: `ERR12389696.10060311` has `nMatch=137`, threshold=198 → `MAPPEDFILTER-RESULT: unmapped=short`.
+**Breakdown of 12 remaining FPs**:
+- 9 FPs: STAR combined WT score 109-193 < 198 threshold; ruSTAR adj_score 203-264 > 198
+- 2 FPs (2243566, 21434027): STAR nW=0 (no seed windows); ruSTAR finds 16 and 3 joint_pairs
+- 1 FP (9495507): STAR nTr=12 > outFilterMultimapNmax=10; ruSTAR score-range filter keeps 1 pair (inflated score 291 vs tied 289 elsewhere)
+
+**Phase 16.32 (2026-03-26)**: Added `outFilterMultimapNmax` check after `filter_paired_transcripts`. Mechanism is correct but blocked by score inflation for all 12 FPs.
+
+**Historical note**: 132 of the original 144 FPs were non-palindromic overlapping pairs rejected by STAR via `outFilterMatchNminOverLread`. These were fixed by the scoreGenomicLengthLog2scale penalty (Phase 16.31) which correctly reduced the combined WT score below the threshold.
 
 ## Remaining Limitations (Top 5)
 

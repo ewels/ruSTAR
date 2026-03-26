@@ -221,9 +221,14 @@ See [docs/phase16_algorithm.md](docs/phase16_algorithm.md) for sub-phase notes (
 
 **Phase 16.31 (2026-03-25):** Applied `scoreGenomicLengthLog2scale` penalty to combined PE WT score before threshold check (`stitchWindowAligns.cpp:262-265`). `penalty = ceil(log2(gspan) * -0.25 - 0.5)`, typically -2. Reuses `scorer.genomic_length_penalty()`. Fixed 132/144 FPs (144->12). Created 35 new STAR-only misses (122->157) -- latent scoring discrepancy for borderline pairs.
 
-**PE false positives -- updated status (2026-03-25):**
+**Phase 16.32 (2026-03-26):** Added `outFilterMultimapNmax` check for PE joint pairs after `filter_paired_transcripts`. If `joint_pairs.len() > outFilterMultimapNmax`, return `TooManyLoci`. Mechanism is correct but blocked for all 12 remaining FPs by upstream scoring inflation that shifts the score-range filter to retain only 1 pair instead of the 12+ needed to trigger the check. Root cause: ruSTAR combined WT score is 36-106 points higher than STAR's finalized combined WT score for these overlapping/repeat-region pairs.
 
-Of the original 144 FPs, 132 were fixed by the `scoreGenomicLengthLog2scale` penalty (Phase 16.31). 12 FPs remain (higher pre-penalty scores >=200). 35 new STAR-only regressions: borderline pairs with raw scores ~198-200 that fall below threshold after penalty, while STAR's raw scores are marginally higher.
+**PE false positives -- updated status (2026-03-26):**
+
+Of the original 144 FPs, 132 were fixed by the `scoreGenomicLengthLog2scale` penalty (Phase 16.31). 12 FPs remain. All 12 are blocked by combined-WT score inflation (36-106 pts above STAR). Root cause analysis:
+- 9 FPs: STAR combined WT score 109-193 < 198 threshold (ruSTAR 203-264 > 198). Score inflation ≈ 36-106 pts.
+- 2 FPs (2243566, 21434027): STAR nW=0 (no seed windows found); ruSTAR finds 16 and 3 joint_pairs.
+- 1 FP (9495507): STAR nTr=12 > outFilterMultimapNmax=10; ruSTAR score-range filter collapses 55→1 pair due to 2-pt inflation at one locus (chr15:14191228 M1 scores 143 vs tied 141 elsewhere).
 
 **Remaining PE gap:** 12 ruSTAR-only false positives, 157 STAR-only missed (35 post-16.31 regressions + 122 pre-existing). See `docs/star_comparison/DIFFERENCES.md`.
 

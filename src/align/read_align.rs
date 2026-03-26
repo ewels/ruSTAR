@@ -1050,6 +1050,12 @@ pub fn align_paired_read(
     }
     filter_paired_transcripts(&mut joint_pairs, params);
 
+    // STAR mappedFilter: nBestMate > outFilterMultimapNmax → unmapped(multi).
+    // Applied after score-range filter and quality filter, same as STAR's mappedFilter ordering.
+    if joint_pairs.len() > params.out_filter_multimap_nmax as usize {
+        return Ok((Vec::new(), 0, Some(UnmappedReason::TooManyLoci)));
+    }
+
     // 1. BothMapped from joint combined-read path
     if !joint_pairs.is_empty() {
         let pe_mapq_n = joint_pairs.len().max(1);
