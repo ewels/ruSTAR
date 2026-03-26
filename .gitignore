@@ -33,3 +33,7 @@ target
 /test/*_test*/
 /test/results/
 /test/debug/
+*.out
+*.log
+*.tab
+*.sam
