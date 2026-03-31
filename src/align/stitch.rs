@@ -1811,7 +1811,7 @@ fn stitch_recurse(
 ) {
     const MAX_RECURSION: u32 = 10_000;
 
-    if *recursion_count >= MAX_RECURSION || transcripts.len() >= max_transcripts {
+    if *recursion_count >= MAX_RECURSION {
         return;
     }
     *recursion_count += 1;
@@ -1993,7 +1993,21 @@ fn stitch_recurse(
                 for &idx in remove_indices.iter().rev() {
                     transcripts.swap_remove(idx);
                 }
-                transcripts.push(wt);
+                if transcripts.len() < max_transcripts {
+                    transcripts.push(wt);
+                } else if let Some(worst_idx) = transcripts
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, t)| t.score)
+                    .filter(|(_, t)| t.score < wt.score)
+                    .map(|(i, _)| i)
+                {
+                    // STAR-faithful eviction: keep the N best transcripts.
+                    // If the new WT scores better than the current worst, evict
+                    // the worst and insert the new one.
+                    transcripts.swap_remove(worst_idx);
+                    transcripts.push(wt);
+                }
             }
         }
         return;
@@ -2174,6 +2188,7 @@ pub(crate) fn stitch_seeds_working(
     junction_db: Option<&crate::junction::SpliceJunctionDb>,
     max_transcripts_per_window: usize,
     align_mates_gap_max: u64,
+    debug_name: &str,
 ) -> Result<(Vec<WorkingTranscript>, SeedCluster, bool, Vec<u8>), Error> {
     stitch_seeds_core(
         cluster,
@@ -2183,7 +2198,7 @@ pub(crate) fn stitch_seeds_working(
         junction_db,
         max_transcripts_per_window,
         align_mates_gap_max,
-        "",
+        debug_name,
     )
 }
 

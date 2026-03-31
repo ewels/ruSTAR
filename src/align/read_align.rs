@@ -686,6 +686,7 @@ pub fn align_paired_read(
     for cluster in clusters.iter().take(params.align_windows_per_read_nmax) {
         let cluster_is_reverse = cluster.is_reverse;
 
+        let debug_stitch_name: &str = if debug_pe { &read_name } else { "" };
         let (wts, stitch_cluster, _stitch_is_reverse, _stitch_read) = stitch_seeds_working(
             cluster,
             &combined,
@@ -694,6 +695,7 @@ pub fn align_paired_read(
             junction_db,
             params.align_transcripts_per_window_nmax,
             params.align_mates_gap_max as u64,
+            debug_stitch_name,
         )?;
 
         for wt in wts {
