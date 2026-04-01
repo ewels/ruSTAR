@@ -1016,29 +1016,30 @@ fn stitch_align_to_transcript(
         // --- jR scanning for BOTH splice junctions and deletions (STAR-faithful) ---
         // STAR uses the same scanning code path for both cases; the only difference
         // is motif detection (splice) vs pure positional score (deletion).
-        let donor_sa = last_exon.genome_end + shared as u64;
+        // donor_sa = exclusive end of exon A = STAR's gAend+1. jr_shift = STAR's jR.
+        let donor_sa = last_exon.genome_end;
         let (jr_shift, motif, motif_score, jj_l, jj_r) = scorer.find_best_junction_position(
             read_seq,
-            last_exon.read_end + shared,
+            last_exon.read_end,
             donor_sa,
             read_gap.max(0),
             genome_gap,
             &index.genome,
             cluster.is_reverse,
             index.genome.n_genome,
-            last_exon.read_end - last_exon.read_start + shared,
+            last_exon.read_end - last_exon.read_start,
             eff_length,
         );
 
-        // Clamp shift: must not consume entire donor or acceptor
-        let prev_match_len = (last_exon.read_end - last_exon.read_start + shared) as i32;
-        let jr_shift = jr_shift.max(-prev_match_len).min(eff_length as i32);
+        // Clamp shift: jr_shift = STAR's jR. Lower bound: can't consume entire exon A.
+        // Upper bound: scan already limited to < shared+eff_length but clamp for safety.
+        let prev_match_len = (last_exon.read_end - last_exon.read_start) as i32;
+        let jr_shift = jr_shift
+            .max(-prev_match_len)
+            .min((eff_length + shared) as i32);
 
-        // Post-jR shared base scoring using correct genome side (STAR-faithful).
-        // Our jr_shift is relative to donor_sa = genome_end + shared, while STAR's
-        // jR is relative to genome_end. So STAR_jR = jr_shift + shared.
-        // junction_offset = number of shared bases on donor side
-        let junction_offset = (shared as i32 + jr_shift).max(0).min(shared as i32) as usize;
+        // junction_offset = number of shared bases assigned to donor side (= clamped jR)
+        let junction_offset = jr_shift.max(0).min(shared as i32) as usize;
 
         let mut shared_mm = 0u32;
         let mut shared_score = 0i32;
@@ -1072,13 +1073,15 @@ fn stitch_align_to_transcript(
             shared_score += acceptor_bases as i32 - 2 * mm as i32;
         }
 
-        // Extended left range: junction shifted left past ALL shared bases into exon A
-        if jr_shift < -(shared as i32) {
-            let n_extra = (-(jr_shift + shared as i32)) as usize;
-            let extra_read_start =
-                (last_exon.read_end as i64 + jr_shift as i64 + shared as i64) as usize;
+        // Extended left range: junction shifted left of natural position (jR < 0).
+        // These bases were presumed matches in exon A; penalize mismatches on acceptor side.
+        if jr_shift < 0 {
+            let n_extra = (-jr_shift) as usize;
+            // STAR: R[rAend + jR+1 .. 0] vs G[gBstart1 + jR+1 .. 0]
+            // gBstart1 = eff_genome_pos - shared - 1, so start at gBstart1+jR+1 = eff_genome_pos-shared+jR
+            let extra_read_start = (last_exon.read_end as i64 + jr_shift as i64) as usize;
             let extra_genome_start =
-                (last_exon.genome_end as i64 + jr_shift as i64 + shared as i64 + del as i64) as u64;
+                (eff_genome_pos as i64 - shared as i64 + jr_shift as i64) as u64;
             let extra_mm = count_mismatches_in_region(
                 read_seq,
                 extra_read_start,
@@ -1091,12 +1094,10 @@ fn stitch_align_to_transcript(
             shared_score -= 2 * extra_mm as i32;
         }
 
-        // Extended right range: junction shifted right into seed B territory.
-        // STAR_jR = jr_shift + shared (ruSTAR's jr_shift is measured from end of shared region,
-        // while STAR's jR is measured from end of seed A). Extended right triggers when
-        // STAR_jR > rGap (= shared), i.e. jr_shift > 0. n_extra = STAR_jR - rGap = jr_shift.
-        if jr_shift > 0 {
-            let n_extra = jr_shift as usize;
+        // Extended right range: junction shifted right beyond all shared bases (jR > rGap).
+        // These bases are in seed B territory; penalize mismatches on donor side.
+        if jr_shift > shared as i32 {
+            let n_extra = (jr_shift - shared as i32) as usize;
             let extra_read_start = last_exon.read_end + shared;
             let extra_genome_start = last_exon.genome_end + shared as u64;
             let extra_mm = count_mismatches_in_region(
@@ -1149,22 +1150,20 @@ fn stitch_align_to_transcript(
         }
 
         // --- Common: adjust exon A and create exon B ---
-        if jr_shift != 0 {
-            if let Some(last) = new_wt.exons.last_mut() {
-                last.read_end = (last.read_end as i64 + shared as i64 + jr_shift as i64) as usize;
-                last.genome_end = (last.genome_end as i64 + shared as i64 + jr_shift as i64) as u64;
-            }
-        } else if shared > 0
+        // jr_shift = STAR's jR: number of shared bases assigned to donor (exon A).
+        // Exon A extends right by jr_shift; exon B starts jr_shift bases into the shared region.
+        if jr_shift != 0
             && let Some(last) = new_wt.exons.last_mut()
         {
-            last.read_end += shared;
-            last.genome_end += shared as u64;
+            last.read_end = (last.read_end as i64 + jr_shift as i64) as usize;
+            last.genome_end = (last.genome_end as i64 + jr_shift as i64) as u64;
         }
 
-        // New exon for B side
-        let b_read_start = (eff_read_pos as i64 + jr_shift as i64) as usize;
-        let b_genome_start = (eff_genome_pos as i64 + jr_shift as i64) as u64;
-        let b_len = (eff_length as i64 - jr_shift as i64).max(0) as usize;
+        // New exon for B side: starts at (eff_read_pos - shared + jr_shift), absorbs
+        // the (shared - jr_shift) acceptor-side shared bases plus the full eff_length seed.
+        let b_read_start = (eff_read_pos as i64 - shared as i64 + jr_shift as i64) as usize;
+        let b_genome_start = (eff_genome_pos as i64 - shared as i64 + jr_shift as i64) as u64;
+        let b_len = (eff_length as i64 + shared as i64 - jr_shift as i64).max(0) as usize;
         new_wt.exons.push(ExonBlock {
             read_start: b_read_start,
             read_end: b_read_start + b_len,
@@ -2180,6 +2179,7 @@ pub(crate) fn stitch_seeds_with_jdb_debug(
 /// - Splitting with `split_working_transcript()`
 /// - Finalizing each half with `finalize_transcript()`
 /// - Restoring `is_reverse` and `read_seq` on finalized transcripts as needed
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn stitch_seeds_working(
     cluster: &SeedCluster,
     read_seq: &[u8],

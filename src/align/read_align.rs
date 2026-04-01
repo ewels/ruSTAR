@@ -686,7 +686,7 @@ pub fn align_paired_read(
     for cluster in clusters.iter().take(params.align_windows_per_read_nmax) {
         let cluster_is_reverse = cluster.is_reverse;
 
-        let debug_stitch_name: &str = if debug_pe { &read_name } else { "" };
+        let debug_stitch_name: &str = if debug_pe { read_name } else { "" };
         let (wts, stitch_cluster, _stitch_is_reverse, _stitch_read) = stitch_seeds_working(
             cluster,
             &combined,
