@@ -1957,7 +1957,12 @@ fn stitch_recurse(
                 }
             }
 
-            // Dedup via blocks_overlap: drop if subset of existing higher-score transcript
+            // Dedup via blocks_overlap: drop if subset of existing higher-score transcript.
+            // Use same_structure guard: only dedup transcripts with same number of exon
+            // blocks. A non-spliced path should never be killed by a spliced one here
+            // because the spliced path may still be rejected by finalize_transcript
+            // (overhang check), leaving no valid transcript. STAR-faithful dedup of
+            // spliced-vs-unspliced is handled post-finalization below.
             let mut dominated = false;
             let mut remove_indices = Vec::new();
             for (idx, existing) in transcripts.iter().enumerate() {
@@ -1974,9 +1979,6 @@ fn stitch_recurse(
                     .sum();
 
                 // Only dedup transcripts with same number of exon blocks (junctions).
-                // A non-spliced path should never be removed because a spliced path
-                // covers the same bases — they may score differently after finalization
-                // (genomic length penalty favors shorter genomic spans).
                 let same_structure = wt.exons.len() == existing.exons.len();
                 if same_structure && overlap >= wt_len && existing.score >= wt.score {
                     dominated = true;
@@ -2158,6 +2160,78 @@ pub(crate) fn stitch_seeds_with_jdb_debug(
             }
             transcripts.push(transcript);
         }
+    }
+
+    // STAR-faithful post-finalization dedup (stitchWindowAligns.cpp lines 337-355):
+    // After finalization, drop transcripts that are fully covered by a higher-scored one.
+    // This removes spurious unspliced secondaries that are subsets of spliced primaries.
+    // Performed AFTER finalize so only valid transcripts (passed overhang checks) participate.
+    {
+        // Compute overlap between two finalized Exon slices (same diagonal + read-space).
+        let exon_overlap =
+            |a: &[crate::align::transcript::Exon], b: &[crate::align::transcript::Exon]| -> u32 {
+                let mut ov = 0u32;
+                let mut i = 0;
+                let mut j = 0;
+                while i < a.len() && j < b.len() {
+                    let diag_a = a[i].genome_start as i64 - a[i].read_start as i64;
+                    let diag_b = b[j].genome_start as i64 - b[j].read_start as i64;
+                    if diag_a == diag_b {
+                        let r_start = a[i].read_start.max(b[j].read_start);
+                        let r_end = a[i].read_end.min(b[j].read_end);
+                        if r_start < r_end {
+                            ov += (r_end - r_start) as u32;
+                        }
+                    }
+                    if a[i].read_end <= b[j].read_end {
+                        i += 1;
+                    } else {
+                        j += 1;
+                    }
+                }
+                ov
+            };
+
+        let mut keep = vec![true; transcripts.len()];
+        for i in 0..transcripts.len() {
+            if !keep[i] {
+                continue;
+            }
+            for j in 0..transcripts.len() {
+                if i == j || !keep[j] {
+                    continue;
+                }
+                let overlap = exon_overlap(&transcripts[i].exons, &transcripts[j].exons);
+                let len_i: u32 = transcripts[i]
+                    .exons
+                    .iter()
+                    .map(|e| (e.read_end - e.read_start) as u32)
+                    .sum();
+                let len_j: u32 = transcripts[j]
+                    .exons
+                    .iter()
+                    .map(|e| (e.read_end - e.read_start) as u32)
+                    .sum();
+                let u_i = len_i.saturating_sub(overlap);
+                let u_j = len_j.saturating_sub(overlap);
+
+                if u_i == 0 && transcripts[i].score < transcripts[j].score {
+                    // i is fully covered by j AND has strictly worse score → i is redundant
+                    keep[i] = false;
+                    break;
+                } else if u_j == 0 && transcripts[j].score < transcripts[i].score {
+                    // j is fully covered by i AND has strictly worse score → j is redundant
+                    keep[j] = false;
+                }
+            }
+        }
+        let mut out = Vec::with_capacity(transcripts.len());
+        for (i, t) in transcripts.into_iter().enumerate() {
+            if keep[i] {
+                out.push(t);
+            }
+        }
+        transcripts = out;
     }
 
     // Sort by score descending, then shorter genomic span (STAR's gLength tiebreaker).

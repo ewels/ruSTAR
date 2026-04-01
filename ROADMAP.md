@@ -51,7 +51,7 @@ Paired-end (Phase 8) builds on threaded infrastructure. GTF/junctions (Phase 7) 
 | 12 | Chimeric Detection | ✅ | 170 | SE chimeric, Chimeric.out.junction |
 | [13](docs/phase13_accuracy.md) | Performance + Accuracy | ✅ | 205 | 94.5% pos, 97.8% CIGAR, 2.1% splice |
 | [15](docs/phase15_sam_tags.md) | SAM Tags + PE Fix | ✅ | 235 | NH/HI/AS/NM/nM/XS/jM/jI/MD, PE fix |
-| [16](docs/phase16_algorithm.md) | Algorithm Parity | ✅* | 268 | SE: 99.7% pos, 2.2% splice, 26 actionable, 0 STAR-only, MAPQ inflate 1; PE: **8400/8390 (+10 ruSTAR)**, 98.9% per-mate pos (Phase 16.35: STAR-faithful rGap jR coordinate fix) |
+| [16](docs/phase16_algorithm.md) | Algorithm Parity | ✅* | 268 | SE: 99.7% pos, 2.2% splice, 26 actionable, 0 STAR-only, MAPQ inflate 1, deflate 0; PE: **8400/8390 (+10 ruSTAR)**, 98.9% per-mate pos (Phase 16.36: post-finalization dedup fixes MAPQ deflation) |
 | [17](docs/phase17_features.md) | Features + Polish | ✅* | 268 | Log.final.out, clippy cleanup, sorted BAM planned |
 | 14 | STARsolo | DEFERRED | — | Waiting for accuracy parity |
 
@@ -236,9 +236,9 @@ Of the original 144 FPs, 132 were fixed by the `scoreGenomicLengthLog2scale` pen
 
 | Issue | Count | Difficulty |
 |-------|-------|------------|
-| Wrong intron choice (same chr, different large intron) | 4 | High |
-| MAPQ inflation (missed splice/indel secondary) | 4 | Medium |
-| MAPQ deflation (extra unspliced secondary) | 4 | Medium |
+| Wrong intron choice (same chr, different large intron) | 3 | High |
+| MAPQ inflation (missed splice/indel secondary) | 1 | Medium |
+| MAPQ deflation (extra unspliced secondary) | 0 | **FIXED Phase 16.36** |
 | ruSTAR false splice (adapter contamination, 279 kb) | 1 | Medium |
 | STAR-only mapped (high-mismatch read NM=10) | 1 | Unknown |
 
