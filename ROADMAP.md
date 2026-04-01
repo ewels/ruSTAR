@@ -232,17 +232,23 @@ Of the original 144 FPs, 132 were fixed by the `scoreGenomicLengthLog2scale` pen
 
 **Remaining PE gap:** 12 ruSTAR-only false positives, 157 STAR-only missed (35 post-16.31 regressions + 122 pre-existing). See `docs/star_comparison/DIFFERENCES.md`.
 
+**Position disagreement reclassification (2026-04-01):**
+
+All 126 position disagreements (100 diff-chr + 26 same-chr) verified as **genuine ties** via STAR debug tracing. Both tools find identical alignment sets; difference is only primary selection order based on SA iteration. Previously labelled "26 actionable" were also ties.
+
 **Remaining fixable SE issues (deferred):**
 
 | Issue | Count | Difficulty |
 |-------|-------|------------|
-| Wrong intron choice (same chr, different large intron) | 3 | High |
-| MAPQ inflation (missed splice/indel secondary) | 1 | Medium |
+| Wrong intron (ruSTAR finds worse alignment at correct locus) | 2 | High — `ERR12389696.5825571` (AS=99 vs AS=101), `ERR12389696.13573895` |
+| MAPQ inflation (missed splice secondary) | 1 | Medium — `ERR12389696.16030539`, STAR finds XV:121224 128M925400N10M12S |
 | MAPQ deflation (extra unspliced secondary) | 0 | **FIXED Phase 16.36** |
-| ruSTAR false splice (adapter contamination, 279 kb) | 1 | Medium |
-| STAR-only mapped (high-mismatch read NM=10) | 1 | Unknown |
+| ruSTAR false splice (adapter contamination, 279 kb intron) | 1 | Medium — `ERR12389696.18296181` |
+| STAR-only mapped (high-mismatch read NM=10) | 1 | Unknown — `ERR12389696.13766843` |
 
-**Remaining PE gap:** 144 ruSTAR-only false positives (fix: combined nMatch threshold), 122 STAR-only missed (root cause TBD). See `docs/star_comparison/DIFFERENCES.md`.
+**Note:** The previously-listed "3 wrong intron" and "wrong intron choice (4 reads)" counts were inflated by tie-breaking cases incorrectly classified as actionable. Only 2 genuine wrong-intron cases remain.
+
+**Current PE gap (Phase 16.36):** ruSTAR=8400 vs STAR=8390 (+10 ruSTAR over). ~16 ruSTAR-only FPs (~13 pre-existing, ~3 splice-related, score inflation root cause TBD). ~6 STAR-only mates. See `docs/star_comparison/DIFFERENCES.md`.
 
 ---
 

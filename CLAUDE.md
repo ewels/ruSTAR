@@ -32,7 +32,7 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Status
 
-**268 tests passing, 0 clippy warnings.** SE: 99.7% position agreement (adjusted), 99.9% CIGAR (pos-agreeing), 2.2% splice rate (STAR: 2.2%), 67 shared junctions, 99.9% MAPQ agreement, 26 actionable disagreements, 0 STAR-only / 0 ruSTAR-only mapped. MAPQ inflation: 4, deflation: 4. PE: **8392/8390 both-mapped (+2 ruSTAR over STAR)**, 0 half-mapped, ~2 ruSTAR-only FPs, 98.8% per-mate position agreement (Phase 16.33: PE mate2 left-extension suppression — fixed zero-insert RF pairs). See [ROADMAP.md](ROADMAP.md) for detailed phase tracking and [docs/](docs/) for per-phase notes.
+**268 tests passing, 0 clippy warnings.** SE: 99.7% position agreement (adjusted), 99.9% CIGAR (pos-agreeing), 2.2% splice rate (STAR: 2.2%), 67 shared junctions, 100.0% MAPQ agreement, MAPQ inflation: 1, deflation: 0. 126 position disagreements (ALL verified as genuine ties — same alignment set, different primary ordering). 5 truly actionable SE issues remain. PE: **8400/8390 both-mapped (+10 ruSTAR over STAR)**, 0 half-mapped, ~16 ruSTAR-only FPs, 98.9% per-mate position agreement (Phase 16.36: post-finalization dedup fixes MAPQ deflation). See [ROADMAP.md](ROADMAP.md) for detailed phase tracking and [docs/](docs/) for per-phase notes.
 
 ## Source Layout
 
@@ -132,25 +132,31 @@ predicates = "3"
 
 ## Known Issues — Disagreement Root Causes (10k SE yeast)
 
-126 total position disagreements, 26 actionable:
+**126 total position disagreements — ALL verified as genuine ties** (confirmed via STAR debug tracing, 2026-04-01):
 
-1. **Diff-chr multi-mapper ties (100 reads)** — Same CIGAR/MAPQ, different positions in repeat copies (rDNA). **Unavoidable** without matching STAR's internal SA iteration order.
-2. **Same-chr repeat ties (~19 reads)** — rDNA/segmental dup copies on XII and IV. Same CIGAR/MAPQ, different position. **Unavoidable.**
-3. **Wrong intron choice (4 reads)** — ruSTAR picks a different large intron than STAR (e.g., 170kb vs 84kb) at multi-mapping loci on VII/XV.
-4. **MAPQ inflation (4 reads)** — ruSTAR=255 (unique) when STAR finds an additional spliced or indel alternative that ruSTAR misses.
-5. **MAPQ deflation (4 reads)** — ruSTAR generates extra unspliced secondary that makes the primary multi-mapped. 2 pre-existing + 2 unmasked by Phase 16.29 scoring fix.
-6. **ruSTAR-only (1 read)** — `ERR12389696.18296181` false splice with adapter contamination, 279kb intron.
-7. **STAR-only (1 read)** — `ERR12389696.13766843` high-mismatch read (NM=10), not mapped by ruSTAR.
+Both tools find identical alignment sets for all 126 disagreements. The primary difference is tie-breaking order, which depends on SA iteration order. Neither alignment is more correct than the other.
+
+- **100 diff-chr ties** — same set of alignments, different repeat copy chosen as primary. SA order differs between tools.
+- **26 same-chr ties** — same genomic position, same CIGAR, same MAPQ, different copy from tandem repeat (e.g. rDNA on XII, segmental dups on IV).
+
+**5 truly actionable SE issues (fixable algorithm differences):**
+
+1. **Wrong intron choice (2 reads)** — ruSTAR finds worse alignment at the correct locus than STAR: `ERR12389696.5825571` (ruSTAR `121M29S` AS=99 vs STAR `121M607028N13M16S` AS=101), `ERR12389696.13573895` (ruSTAR `100M1I45M4S` vs STAR `108M1I37M4S`). STAR finds a better splice that ruSTAR misses.
+2. **MAPQ inflation (1 read)** — `ERR12389696.16030539`: ruSTAR MAPQ=255, STAR MAPQ=3. STAR finds secondary `XV:121224 128M925400N10M12S` (AS=123) that ruSTAR misses.
+3. **ruSTAR-only false splice (1 read)** — `ERR12389696.18296181` maps with 279kb intron (adapter contamination pattern, likely spurious).
+4. **STAR-only (1 read)** — `ERR12389696.13766843` high-mismatch read (NM=10), not mapped by ruSTAR.
 
 See [ROADMAP.md](ROADMAP.md) and [docs/](docs/) for full issue tracking.
 
-## PE Status (Updated 2026-03-31 — Phase 16.33)
+## PE Status (Updated 2026-04-01 — Phase 16.36)
+
+**Phase 16.36** (post-finalization dedup) is the latest. Current PE parity: ruSTAR=8400 vs STAR=8390, ruSTAR +10 over STAR.
 
 **Phase 16.33** fixed zero-insert RF pairs (e.g. `ERR12389696.10454315`) by adding `no_left_ext: bool` to `finalize_transcript`. Two cascading bugs were fixed:
 1. **extlen signed arithmetic** (`stitch_align_to_transcript`): when `wa.sa_pos < first_exon.genome_start`, old unsigned code fell back to `wa.read_pos` (gave extlen=198→2-base extension). Fixed to signed i64 = STAR's `gBstart - EX_G + EX_R` formula (gives extlen=1).
 2. **mate2 left-extension suppression** (`finalize_transcript`): after split, wt2.read_start=46; per-mate finalize tried to extend leftward 46 bases into adapter, spuriously matching 1 adapter base. Added `no_left_ext: bool` param; pass `true` for mate2 (fwd cluster) and rc_mate1 (rev cluster).
 
-**Current PE parity**: ruSTAR=8392 vs STAR=8390. ruSTAR +2 over STAR. ~2 residual FPs (score inflation, root cause TBD). 75 diff-chr disagreements per mate (unavoidable multi-mapper ties), ~21-24 same-chr per mate (some fixable).
+**Current PE parity**: ruSTAR=8400 vs STAR=8390. ruSTAR +10 over STAR. ~16 ruSTAR-only FPs (~13 pre-existing non-splice reads, ~3 splice-related). 6 STAR-only mates. 75 diff-chr disagreements per mate (unavoidable multi-mapper ties), ~21-24 same-chr per mate (some fixable).
 
 ## Remaining Limitations (Top 5)
 
