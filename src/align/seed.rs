@@ -47,6 +47,7 @@ impl Seed {
         index: &GenomeIndex,
         min_seed_length: usize,
         params: &Parameters,
+        debug_name: &str,
     ) -> Result<Vec<Seed>, Error> {
         let mut seeds = Vec::new();
         let read_len = read_seq.len();
@@ -66,6 +67,7 @@ impl Seed {
             min_seed_length,
             params,
             false,
+            debug_name,
             &mut seeds,
         )?;
 
@@ -83,6 +85,7 @@ impl Seed {
             min_seed_length,
             params,
             true,
+            debug_name,
             &mut seeds,
         )?;
 
@@ -112,14 +115,14 @@ impl Seed {
         params: &Parameters,
     ) -> Result<Vec<Seed>, Error> {
         // Find seeds from mate1 (tag with mate_id = 0)
-        let mut seeds = Self::find_seeds(mate1_seq, index, min_seed_length, params)?;
+        let mut seeds = Self::find_seeds(mate1_seq, index, min_seed_length, params, "")?;
         for seed in &mut seeds {
             seed.mate_id = 0;
         }
 
         // Find seeds from mate2 (tag with mate_id = 1)
         // IMPORTANT: read_pos is relative to mate2 start (will be adjusted during stitching)
-        let mut seeds2 = Self::find_seeds(mate2_seq, index, min_seed_length, params)?;
+        let mut seeds2 = Self::find_seeds(mate2_seq, index, min_seed_length, params, "")?;
         for seed in &mut seeds2 {
             seed.mate_id = 1;
         }
@@ -194,6 +197,7 @@ struct MmpResult {
 /// With default seedSearchNmax=seedSearchStartLmax=50: iStart = i → dense {0,1,...,49}.
 ///
 /// Used for R→L direction (is_rc=true). L→R uses dense every-position search.
+#[allow(clippy::too_many_arguments)]
 fn search_direction_sparse(
     read_seq: &[u8],
     original_read_len: usize,
@@ -201,6 +205,7 @@ fn search_direction_sparse(
     min_seed_length: usize,
     params: &Parameters,
     is_rc: bool,
+    debug_name: &str,
     seeds: &mut Vec<Seed>,
 ) -> Result<(), Error> {
     let read_len = read_seq.len();
@@ -248,6 +253,18 @@ fn search_direction_sparse(
 
             let result =
                 find_seed_at_position(read_seq, pos, index, min_seed_length, false, params)?;
+
+            if !debug_name.is_empty() {
+                let dir = if is_rc { "RC" } else { "FWD" };
+                let seed_info = match &result.seed {
+                    Some(s) => format!("seed(len={} sa={}-{})", s.length, s.sa_start, s.sa_end),
+                    None => "no_seed".to_string(),
+                };
+                eprintln!(
+                    "[DEBUG-SEED {}] {} istart={} pos={} advance={} {}",
+                    debug_name, dir, istart, pos, result.advance, seed_info
+                );
+            }
 
             if let Some(mut seed) = result.seed {
                 // Apply seedSearchLmax cap
@@ -356,12 +373,27 @@ fn find_seed_at_position(
         });
     }
 
-    // Find maximum mappable prefix length and narrow SA range (STAR's maxMappableLength).
-    // When bounds are tight (both from present SAindex entries), we can skip
-    // comparing the first matched_level bases since all entries share that prefix.
-    let l_initial = if bounds_tight { matched_level } else { 0 };
-    let (match_length, narrowed_start, narrowed_end) =
-        max_mappable_length(read_seq, read_pos, index, sa_start, sa_end, l_initial);
+    // STAR short-circuit (maxMappableLength2strands.cpp):
+    // "if (Lind < gSAindexNbases && iSA1noN && iSA2good) { maxL=Lind; }"
+    // When the hierarchical lookup falls back to a prefix shorter than the full
+    // SAindex depth AND bounds are tight, STAR skips the binary search and uses
+    // matched_level directly as the MMP. This causes chains to advance by shorter
+    // amounts, ensuring intermediate positions (missed if advancing by the true MMP)
+    // are not skipped.
+    let (match_length, narrowed_start, narrowed_end) = if bounds_tight
+        && matched_level < sa_nbases
+    {
+        // STAR short-circuit (maxMappableLength2strands.cpp):
+        // "if (Lind < gSAindexNbases && iSA1noN && iSA2good) { maxL=Lind; }"
+        // Very short prefix already found in SAindex; no genome comparison needed.
+        (matched_level, sa_start, sa_end)
+    } else {
+        // Find maximum mappable prefix length and narrow SA range (STAR's maxMappableLength).
+        // When bounds are tight (both from present SAindex entries), we can skip
+        // comparing the first matched_level bases since all entries share that prefix.
+        let l_initial = if bounds_tight { matched_level } else { 0 };
+        max_mappable_length(read_seq, read_pos, index, sa_start, sa_end, l_initial)
+    };
     let advance = match_length.max(1);
 
     // Check seedMultimapNmax: filter seeds that map to too many loci
@@ -675,7 +707,7 @@ mod tests {
         let args = vec!["ruSTAR", "--runMode", "alignReads"];
         let params = Parameters::parse_from(args);
 
-        let seeds = Seed::find_seeds(&read, &index, 4, &params).unwrap();
+        let seeds = Seed::find_seeds(&read, &index, 4, &params, "").unwrap();
 
         // Should find at least one seed
         assert!(!seeds.is_empty());
@@ -694,11 +726,11 @@ mod tests {
         let params = Parameters::parse_from(args);
 
         // With min_seed_length=4, should find nothing (read is only 3bp)
-        let seeds = Seed::find_seeds(&read, &index, 4, &params).unwrap();
+        let seeds = Seed::find_seeds(&read, &index, 4, &params, "").unwrap();
         assert!(seeds.is_empty());
 
         // With min_seed_length=2, should find seeds
-        let seeds = Seed::find_seeds(&read, &index, 2, &params).unwrap();
+        let seeds = Seed::find_seeds(&read, &index, 2, &params, "").unwrap();
         assert!(!seeds.is_empty());
     }
 
@@ -710,7 +742,7 @@ mod tests {
         let args = vec!["ruSTAR", "--runMode", "alignReads"];
         let params = Parameters::parse_from(args);
 
-        let seeds = Seed::find_seeds(&read, &index, 2, &params).unwrap();
+        let seeds = Seed::find_seeds(&read, &index, 2, &params, "").unwrap();
 
         // No seeds should be found (GGGG not in ACAC or its reverse complement GTGT)
         assert!(seeds.is_empty());
@@ -724,7 +756,7 @@ mod tests {
         let args = vec!["ruSTAR", "--runMode", "alignReads"];
         let params = Parameters::parse_from(args);
 
-        let seeds = Seed::find_seeds(&read, &index, 4, &params).unwrap();
+        let seeds = Seed::find_seeds(&read, &index, 4, &params, "").unwrap();
         assert!(!seeds.is_empty());
 
         // Get positions for first seed
@@ -745,7 +777,7 @@ mod tests {
         let args = vec!["ruSTAR", "--runMode", "alignReads"];
         let params = Parameters::parse_from(args);
 
-        let seeds = Seed::find_seeds(&read, &index, 4, &params).unwrap();
+        let seeds = Seed::find_seeds(&read, &index, 4, &params, "").unwrap();
         assert!(!seeds.is_empty());
 
         // Single-end seeds should have mate_id = 2
@@ -843,7 +875,7 @@ mod tests {
         let args = vec!["ruSTAR", "--runMode", "alignReads"];
         let params = Parameters::parse_from(args);
 
-        let seeds = Seed::find_seeds(&read, &index, 4, &params).unwrap();
+        let seeds = Seed::find_seeds(&read, &index, 4, &params, "").unwrap();
 
         // Should have R→L seeds (search_rc == true)
         let rc_seeds: Vec<_> = seeds.iter().filter(|s| s.search_rc).collect();
@@ -891,7 +923,7 @@ mod tests {
         ];
         let params = Parameters::parse_from(args);
 
-        let seeds = Seed::find_seeds(&read, &index, 4, &params).unwrap();
+        let seeds = Seed::find_seeds(&read, &index, 4, &params, "").unwrap();
         assert!(
             seeds.len() <= 3,
             "Total seeds ({}) should respect seedPerReadNmax=3",
@@ -945,7 +977,7 @@ mod tests {
         let args = vec!["ruSTAR", "--runMode", "alignReads"];
         let params = Parameters::parse_from(args);
 
-        let seeds = Seed::find_seeds(&read, &index, 4, &params).unwrap();
+        let seeds = Seed::find_seeds(&read, &index, 4, &params, "").unwrap();
 
         for seed in &seeds {
             // All seeds (L→R and R→L) must have valid read positions
@@ -980,7 +1012,7 @@ mod tests {
         let args = vec!["ruSTAR", "--runMode", "alignReads"];
         let params = Parameters::parse_from(args);
 
-        let sparse_seeds = Seed::find_seeds(&read, &index, 4, &params).unwrap();
+        let sparse_seeds = Seed::find_seeds(&read, &index, 4, &params, "").unwrap();
 
         // Count how many seeds dense would produce (every position that has a match)
         let mut dense_count = 0;
@@ -1018,7 +1050,7 @@ mod tests {
         let args = vec!["ruSTAR", "--runMode", "alignReads"];
         let params = Parameters::parse_from(args);
 
-        let seeds = Seed::find_seeds(&read, &index, 4, &params).unwrap();
+        let seeds = Seed::find_seeds(&read, &index, 4, &params, "").unwrap();
 
         for seed in &seeds {
             if seed.search_rc {

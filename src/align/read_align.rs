@@ -92,7 +92,13 @@ pub fn align_read(
 
     // Step 1: Find seeds (seedMapMin from params)
     let min_seed_length = params.seed_map_min;
-    let seeds = Seed::find_seeds(read_seq, index, min_seed_length, params)?;
+    let seeds = Seed::find_seeds(
+        read_seq,
+        index,
+        min_seed_length,
+        params,
+        if debug_read { read_name } else { "" },
+    )?;
 
     if debug_read {
         let total_positions: usize = seeds.iter().map(|s| s.sa_end - s.sa_start).sum();
@@ -630,7 +636,7 @@ pub fn align_paired_read(
 
     let debug_pe = !params.read_name_filter.is_empty() && read_name == params.read_name_filter;
 
-    let mut seeds = Seed::find_seeds(&combined, index, params.seed_map_min, params)?;
+    let mut seeds = Seed::find_seeds(&combined, index, params.seed_map_min, params, "")?;
     assign_seed_mate_ids(&mut seeds, len1, len2);
 
     if debug_pe {
