@@ -51,7 +51,7 @@ Paired-end (Phase 8) builds on threaded infrastructure. GTF/junctions (Phase 7) 
 | 12 | Chimeric Detection | ✅ | 170 | SE chimeric, Chimeric.out.junction |
 | [13](docs/phase13_accuracy.md) | Performance + Accuracy | ✅ | 205 | 94.5% pos, 97.8% CIGAR, 2.1% splice |
 | [15](docs/phase15_sam_tags.md) | SAM Tags + PE Fix | ✅ | 235 | NH/HI/AS/NM/nM/XS/jM/jI/MD, PE fix |
-| [16](docs/phase16_algorithm.md) | Algorithm Parity | ✅* | 268 | SE: 99.7% pos, 2.2% splice, 26 actionable, 0 STAR-only, MAPQ inflate 1, deflate 0; PE: **8400/8390 (+10 ruSTAR)**, 98.9% per-mate pos (Phase 16.36: post-finalization dedup fixes MAPQ deflation) |
+| [16](docs/phase16_algorithm.md) | Algorithm Parity | ✅* | 268 | SE: 99.7% pos, 2.2% splice, 3 actionable, **MAPQ 100% (0 inflate, 0 deflate)**; PE: **8400/8390 (+10 ruSTAR)**, 98.9% per-mate pos (Phase 16.37: alignIntronMax fix) |
 | [17](docs/phase17_features.md) | Features + Polish | ✅* | 268 | Log.final.out, clippy cleanup, sorted BAM planned |
 | 14 | STARsolo | DEFERRED | — | Waiting for accuracy parity |
 
@@ -234,21 +234,24 @@ Of the original 144 FPs, 132 were fixed by the `scoreGenomicLengthLog2scale` pen
 
 **Position disagreement reclassification (2026-04-01):**
 
-All 126 position disagreements (100 diff-chr + 26 same-chr) verified as **genuine ties** via STAR debug tracing. Both tools find identical alignment sets; difference is only primary selection order based on SA iteration. Previously labelled "26 actionable" were also ties.
+All 127 position disagreements (100 diff-chr + 27 same-chr) verified as **genuine ties** via STAR debug tracing. Both tools find identical alignment sets; difference is only primary selection order based on SA iteration.
+
+**Phase 16.37 (alignIntronMax=0 fix, 2026-04-02):**
+- `ERR12389696.5825571` **FIXED**: alignIntronMax=0 should mean no limit (STAR: `if Del>alignIntronMax && alignIntronMax>0`). ruSTAR used finite limit 589824; fixed to `u32::MAX`. Now aligns as `XV:80779 121M607028N13M16S` (607kb intron, exact STAR match).
+- `ERR12389696.16030539` **MAPQ FIXED**: Both tools now find XV:121224 and XV:598336 with MAPQ=3. Differs only in primary tie-breaking. MAPQ inflate: 1→0.
+- `ERR12389696.13573895`: Investigated. Root cause is seed-level tie in homopolymer region — 71-base seed found at RC pos 29 (ruSTAR) vs 37 (STAR). Both score AS=133. Insertion placement differs (100 vs 108). Not fixable without matching STAR's exact Lmapped chain traversal.
 
 **Remaining fixable SE issues (deferred):**
 
 | Issue | Count | Difficulty |
 |-------|-------|------------|
-| Wrong intron (ruSTAR finds worse alignment at correct locus) | 2 | High — `ERR12389696.5825571` (AS=99 vs AS=101), `ERR12389696.13573895` |
-| MAPQ inflation (missed splice secondary) | 1 | Medium — `ERR12389696.16030539`, STAR finds XV:121224 128M925400N10M12S |
-| MAPQ deflation (extra unspliced secondary) | 0 | **FIXED Phase 16.36** |
+| CIGAR insertion placement | 1 | Hard — `ERR12389696.13573895` (AS=133 both, same pos, seed-level tie in homopolymer) |
 | ruSTAR false splice (adapter contamination, 279 kb intron) | 1 | Medium — `ERR12389696.18296181` |
 | STAR-only mapped (high-mismatch read NM=10) | 1 | Unknown — `ERR12389696.13766843` |
+| MAPQ inflation | 0 | **FIXED Phase 16.37** |
+| MAPQ deflation | 0 | **FIXED Phase 16.36** |
 
-**Note:** The previously-listed "3 wrong intron" and "wrong intron choice (4 reads)" counts were inflated by tie-breaking cases incorrectly classified as actionable. Only 2 genuine wrong-intron cases remain.
-
-**Current PE gap (Phase 16.36):** ruSTAR=8400 vs STAR=8390 (+10 ruSTAR over). ~16 ruSTAR-only FPs (~13 pre-existing, ~3 splice-related, score inflation root cause TBD). ~6 STAR-only mates. See `docs/star_comparison/DIFFERENCES.md`.
+**Current PE gap (Phase 16.37):** ruSTAR=8400 vs STAR=8390 (+10 ruSTAR over). ~16 ruSTAR-only FPs (~13 pre-existing, ~3 splice-related, score inflation root cause TBD). ~6 STAR-only mates. See `docs/star_comparison/DIFFERENCES.md`.
 
 ---
 

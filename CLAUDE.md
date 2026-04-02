@@ -32,7 +32,7 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Status
 
-**268 tests passing, 0 clippy warnings.** SE: 99.7% position agreement (adjusted), 99.9% CIGAR (pos-agreeing), 2.2% splice rate (STAR: 2.2%), 67 shared junctions, 100.0% MAPQ agreement, MAPQ inflation: 1, deflation: 0. 126 position disagreements (ALL verified as genuine ties — same alignment set, different primary ordering). 5 truly actionable SE issues remain. PE: **8400/8390 both-mapped (+10 ruSTAR over STAR)**, 0 half-mapped, ~16 ruSTAR-only FPs, 98.9% per-mate position agreement (Phase 16.36: post-finalization dedup fixes MAPQ deflation). See [ROADMAP.md](ROADMAP.md) for detailed phase tracking and [docs/](docs/) for per-phase notes.
+**268 tests passing, 0 clippy warnings.** SE: 99.7% position agreement (adjusted), 99.9% CIGAR (pos-agreeing), 2.2% splice rate (STAR: 2.2%), 66 shared junctions, **100.0% MAPQ agreement, MAPQ inflation: 0, deflation: 0**. 127 position disagreements (ALL verified as genuine ties). 1 CIGAR-only disagree (ERR12389696.13573895, insertion placement, seed-level tie). 3 truly actionable SE issues remain. PE: **8400/8390 both-mapped (+10 ruSTAR over STAR)**, 0 half-mapped, ~16 ruSTAR-only FPs, 98.9% per-mate position agreement (Phase 16.37: alignIntronMax=0 fix). See [ROADMAP.md](ROADMAP.md) for detailed phase tracking and [docs/](docs/) for per-phase notes.
 
 ## Source Layout
 
@@ -132,19 +132,25 @@ predicates = "3"
 
 ## Known Issues — Disagreement Root Causes (10k SE yeast)
 
-**126 total position disagreements — ALL verified as genuine ties** (confirmed via STAR debug tracing, 2026-04-01):
+**127 total position disagreements — ALL verified as genuine ties** (confirmed via STAR debug tracing):
 
-Both tools find identical alignment sets for all 126 disagreements. The primary difference is tie-breaking order, which depends on SA iteration order. Neither alignment is more correct than the other.
+Both tools find identical alignment sets for all 127 disagreements. The primary difference is tie-breaking order (SA iteration order). Neither alignment is more correct than the other.
 
-- **100 diff-chr ties** — same set of alignments, different repeat copy chosen as primary. SA order differs between tools.
-- **26 same-chr ties** — same genomic position, same CIGAR, same MAPQ, different copy from tandem repeat (e.g. rDNA on XII, segmental dups on IV).
+- **100 diff-chr ties** — same set of alignments, different repeat copy chosen as primary.
+- **27 same-chr ties** — same alignment set, different primary due to tie-breaking (includes multi-intron reads where both tools find same 2 alignments but select different primaries).
 
-**5 truly actionable SE issues (fixable algorithm differences):**
+**1 CIGAR-only disagreement (same position, different CIGAR):**
+- `ERR12389696.13573895`: both tools align to XV:218357 MAPQ=255, but ruSTAR gives `100M1I45M4S` (insertion at read pos 100) while STAR gives `108M1I37M4S` (insertion at 108). Root cause: both alignments score AS=133. The 71-base seed is found at RC pos 29 (ruSTAR) vs RC pos 37 (STAR) due to different Lmapped chain paths through a long homopolymer region. Same diagonal, different starting position → different insertion placement. Seed-level tie.
 
-1. **Wrong intron choice (2 reads)** — ruSTAR finds worse alignment at the correct locus than STAR: `ERR12389696.5825571` (ruSTAR `121M29S` AS=99 vs STAR `121M607028N13M16S` AS=101), `ERR12389696.13573895` (ruSTAR `100M1I45M4S` vs STAR `108M1I37M4S`). STAR finds a better splice that ruSTAR misses.
-2. **MAPQ inflation (1 read)** — `ERR12389696.16030539`: ruSTAR MAPQ=255, STAR MAPQ=3. STAR finds secondary `XV:121224 128M925400N10M12S` (AS=123) that ruSTAR misses.
-3. **ruSTAR-only false splice (1 read)** — `ERR12389696.18296181` maps with 279kb intron (adapter contamination pattern, likely spurious).
-4. **STAR-only (1 read)** — `ERR12389696.13766843` high-mismatch read (NM=10), not mapped by ruSTAR.
+**3 truly actionable SE issues:**
+
+1. **ruSTAR-only false splice (1 read)** — `ERR12389696.18296181` maps with 279kb intron (adapter contamination pattern, likely spurious).
+2. **STAR-only (1 read)** — `ERR12389696.13766843` high-mismatch read (NM=10), not mapped by ruSTAR.
+3. **CIGAR-only insertion placement (1 read)** — `ERR12389696.13573895` (see above). Requires matching STAR's exact Lmapped chain to fix.
+
+**Phase 16.37 (alignIntronMax=0 fix) resolved:**
+- `ERR12389696.5825571`: now aligns as `XV:80779 121M607028N13M16S` (exact match with STAR). Root cause: ruSTAR computed a finite intron limit of 589824 when `alignIntronMax=0`, blocking the 607kb intron. STAR uses `>0` guard in `stitchAlignToTranscript.cpp` line 100 — alignIntronMax=0 means no limit. Fix: use `u32::MAX` sentinel in score.rs.
+- `ERR12389696.16030539`: MAPQ inflation resolved. Both tools now find two alignments (XV:121224 128M925400N10M12S and XV:598336 128M448288N10M12S), both MAPQ=3. Primary selection differs (tie). MAPQ inflate: 1→0.
 
 See [ROADMAP.md](ROADMAP.md) and [docs/](docs/) for full issue tracking.
 

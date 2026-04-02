@@ -36,7 +36,8 @@ pub struct AlignmentScorer {
     pub align_sj_overhang_min: u32,
     /// Minimum overhang for annotated splice junctions (alignSJDBoverhangMin, default 3)
     pub align_sjdb_overhang_min: u32,
-    /// Maximum intron length (alignIntronMax, 0 = use default 589824)
+    /// Maximum intron length. 0 = no limit (STAR-faithful: alignIntronMax=0 disables the check).
+    /// Use u32::MAX when the CLI param is 0. Set to a finite value when user specifies a limit.
     pub align_intron_max: u32,
     /// Extra score log-scaled with genomic length: scale * log2(genomicLength)
     pub score_genomic_length_log2_scale: f64,
@@ -98,8 +99,10 @@ impl AlignmentScorer {
             p_mm_max: params.out_filter_mismatch_nover_lmax,
             align_sj_overhang_min: params.align_sj_overhang_min,
             align_sjdb_overhang_min: params.align_sjdb_overhang_min,
+            // STAR: when alignIntronMax==0 the check `Del>alignIntronMax && alignIntronMax>0`
+            // is never true, so all intron sizes are allowed. Mirror with u32::MAX sentinel.
             align_intron_max: if params.align_intron_max == 0 {
-                params.win_bin_window_dist() as u32
+                u32::MAX
             } else {
                 params.align_intron_max
             },
@@ -1052,12 +1055,14 @@ mod tests {
 
     #[test]
     fn test_align_intron_max_default() {
-        // When align_intron_max is 0, from_params should resolve to 589824
+        // When alignIntronMax=0 (default), scorer uses u32::MAX (no limit) — STAR-faithful.
+        // STAR's stitchAlignToTranscript.cpp: `if (Del>alignIntronMax && alignIntronMax>0)`
+        // meaning alignIntronMax=0 disables the check entirely.
         use clap::Parser;
         let params = crate::params::Parameters::try_parse_from(vec!["ruSTAR"]).unwrap();
         assert_eq!(params.align_intron_max, 0);
         let scorer = AlignmentScorer::from_params(&params);
-        assert_eq!(scorer.align_intron_max, 589_824);
+        assert_eq!(scorer.align_intron_max, u32::MAX);
     }
 
     #[test]
