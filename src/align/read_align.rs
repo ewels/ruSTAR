@@ -1336,16 +1336,26 @@ fn check_proper_pair(
 
 /// Calculate signed insert size (TLEN)
 fn calculate_insert_size(mate1_trans: &Transcript, mate2_trans: &Transcript) -> i32 {
-    // TLEN = signed genomic distance from leftmost mate to rightmost mate
-    let start = mate1_trans.genome_start.min(mate2_trans.genome_start);
-    let end = mate1_trans.genome_end.max(mate2_trans.genome_end);
-    let abs_tlen = (end - start) as i32;
-
-    // Sign convention: positive if mate1 is leftmost
-    if mate1_trans.genome_start <= mate2_trans.genome_start {
-        abs_tlen
+    // STAR outSAMtlen=1 (default): tlen is computed from the combined PE transcript span,
+    // not from max/min of individual mate endpoints.
+    //
+    // Forward cluster (mate1 forward, mate2 reverse — FR pair):
+    //   tlen = mate2.genome_end - mate1.genome_start
+    //   mate1 (imate=0 in combined transcript) gets +tlen
+    //
+    // Reverse cluster (mate1 reverse, mate2 forward — RF pair):
+    //   tlen = mate1.genome_end - mate2.genome_start
+    //   mate2 (imate=0 in combined transcript) gets +tlen, so mate1 gets -tlen
+    //
+    // This correctly handles:
+    //   - Same-start overlapping pairs (uses trailing mate's end, not max of both)
+    //   - RF pairs at same position (mate2 gets +tlen, not mate1)
+    if !mate1_trans.is_reverse {
+        // Forward cluster: mate1 on left
+        (mate2_trans.genome_end - mate1_trans.genome_start) as i32
     } else {
-        -abs_tlen
+        // Reverse cluster: mate2 on left, so mate1 gets negative tlen
+        -((mate1_trans.genome_end - mate2_trans.genome_start) as i32)
     }
 }
 
@@ -1866,12 +1876,14 @@ mod tests {
     fn test_calculate_insert_size_negative() {
         use crate::align::transcript::{CigarOp, Exon};
 
-        // Mate2 is leftmost
+        // RF pair: mate1 reverse (right side), mate2 forward (left side).
+        // STAR reverse cluster: tlen = mate1.genome_end - mate2.genome_start = 1300 - 1000 = 300.
+        // mate1 gets -tlen (negative) because mate2 (imate=0 in reverse cluster) is the left mate.
         let t1 = Transcript {
             chr_idx: 0,
             genome_start: 1200,
             genome_end: 1300,
-            is_reverse: false,
+            is_reverse: true, // mate1 is reverse strand → reverse cluster
             exons: vec![Exon {
                 genome_start: 1200,
                 genome_end: 1300,
@@ -1892,7 +1904,7 @@ mod tests {
             chr_idx: 0,
             genome_start: 1000,
             genome_end: 1100,
-            is_reverse: true,
+            is_reverse: false,
             exons: vec![Exon {
                 genome_start: 1000,
                 genome_end: 1100,
@@ -1910,7 +1922,7 @@ mod tests {
         };
 
         let tlen = calculate_insert_size(&t1, &t2);
-        assert_eq!(tlen, -300); // Negative because mate2 is leftmost
+        assert_eq!(tlen, -300); // Negative for mate1 in RF pair (mate2 is the left mate)
     }
 
     #[test]
