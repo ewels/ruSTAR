@@ -32,7 +32,7 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Status
 
-**268 tests passing, 0 clippy warnings.** SE: 99.7% position agreement (adjusted), 99.9% CIGAR (pos-agreeing), 2.2% splice rate (STAR: 2.2%), 66 shared junctions, **100.0% MAPQ agreement, MAPQ inflation: 0, deflation: 0**. 127 position disagreements (ALL verified as genuine ties). 1 CIGAR-only disagree (ERR12389696.13573895, insertion placement, seed-level tie). **1 truly actionable SE issue remains** (CIGAR insertion placement only). PE: **8390/8390 both-mapped (0 gap, exact STAR match)**, 0 half-mapped, 24 MAPQ inflations, **0 MAPQ deflations**, 98.784% PE faithfulness (Phase 16.45: split_working_transcript junction split fix). See [ROADMAP.md](ROADMAP.md) for detailed phase tracking and [docs/](docs/) for per-phase notes.
+**268 tests passing, 0 clippy warnings.** SE: 99.7% position agreement (adjusted), 99.9% CIGAR (pos-agreeing), 2.2% splice rate (STAR: 2.2%), 66 shared junctions, **100.0% MAPQ agreement, MAPQ inflation: 0, deflation: 0**. 127 position disagreements (ALL verified as genuine ties). 1 CIGAR-only disagree (ERR12389696.13573895, insertion placement, seed-level tie). **1 truly actionable SE issue remains** (CIGAR insertion placement only). PE: **8390/8390 both-mapped (0 gap, exact STAR match)**, 0 half-mapped, **6 MAPQ inflations** (was 24), **2 MAPQ deflations** (new, spurious subset WT), **98.879% PE faithfulness** (Phase 16.46: per-position PE dedup removal). See [ROADMAP.md](ROADMAP.md) for detailed phase tracking and [docs/](docs/) for per-phase notes.
 
 ## Source Layout
 

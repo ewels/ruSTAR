@@ -1201,37 +1201,9 @@ pub fn align_paired_read(
             && a.mate2_transcript.cigar == b.mate2_transcript.cigar
     });
 
-    // Pass 2: for each position group, remove entries with strictly lower score than the best.
-    {
-        // Compute max score per position group, then retain only ties.
-        let mut max_by_pos: std::collections::HashMap<
-            (usize, u64, bool, u64, bool),
-            i32,
-        > = std::collections::HashMap::new();
-        for pa in joint_pairs.iter() {
-            let key = (
-                pa.mate1_transcript.chr_idx,
-                pa.mate1_transcript.genome_start,
-                pa.mate1_transcript.is_reverse,
-                pa.mate2_transcript.genome_start,
-                pa.mate2_transcript.is_reverse,
-            );
-            let entry = max_by_pos.entry(key).or_insert(i32::MIN);
-            if pa.combined_wt_score > *entry {
-                *entry = pa.combined_wt_score;
-            }
-        }
-        joint_pairs.retain(|pa| {
-            let key = (
-                pa.mate1_transcript.chr_idx,
-                pa.mate1_transcript.genome_start,
-                pa.mate1_transcript.is_reverse,
-                pa.mate2_transcript.genome_start,
-                pa.mate2_transcript.is_reverse,
-            );
-            pa.combined_wt_score >= *max_by_pos.get(&key).unwrap_or(&i32::MIN)
-        });
-    }
+    // STAR does not do per-position score filtering: multMapSelect collects all transcripts
+    // within the global scoreRange window without any per-position dedup. Same-position
+    // alignments with different CIGARs and scores within scoreRange all count toward NH.
     joint_pairs.sort_by(|a, b| {
         b.combined_wt_score
             .cmp(&a.combined_wt_score)
