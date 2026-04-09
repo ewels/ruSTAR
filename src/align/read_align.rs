@@ -1201,6 +1201,78 @@ pub fn align_paired_read(
             && a.mate2_transcript.cigar == b.mate2_transcript.cigar
     });
 
+    // Post-finalization mate2-exon-subset dedup: remove PE pairs whose mate2 exon coverage
+    // is a diagonal subset of a higher-scored pair's mate2. STAR's greedy DP naturally evicts
+    // subset working transcripts; ruSTAR's recursive stitcher generates them explicitly.
+    // Uses per-exon diagonal (genome_start - read_start) matching, so it correctly
+    // discriminates genuine secondary alignments (133M17S alongside 89M186N53M8S at different
+    // diagonals) from spurious subset alignments (139M11S whose read coverage is fully
+    // contained in 139M132399N11M on the same diagonal).
+    {
+        use crate::align::transcript::Exon;
+        let exons_subset = |b: &[Exon], a: &[Exon]| -> bool {
+            let total_b: u32 = b.iter().map(|e| (e.read_end - e.read_start) as u32).sum();
+            if total_b == 0 {
+                return false;
+            }
+            let mut covered = 0u32;
+            for be in b {
+                let b_diag = be.genome_start as i64 - be.read_start as i64;
+                for ae in a {
+                    let a_diag = ae.genome_start as i64 - ae.read_start as i64;
+                    if a_diag == b_diag {
+                        let r_start = be.read_start.max(ae.read_start);
+                        let r_end = be.read_end.min(ae.read_end);
+                        if r_start < r_end {
+                            covered += (r_end - r_start) as u32;
+                        }
+                    }
+                }
+            }
+            covered == total_b
+        };
+        let n = joint_pairs.len();
+        let mut keep = vec![true; n];
+        for i in 0..n {
+            if !keep[i] {
+                continue;
+            }
+            for j in 0..n {
+                if i == j || !keep[j] {
+                    continue;
+                }
+                let same_pos = joint_pairs[i].mate1_transcript.chr_idx
+                    == joint_pairs[j].mate1_transcript.chr_idx
+                    && joint_pairs[i].mate1_transcript.genome_start
+                        == joint_pairs[j].mate1_transcript.genome_start
+                    && joint_pairs[i].mate1_transcript.genome_end
+                        == joint_pairs[j].mate1_transcript.genome_end
+                    && joint_pairs[i].mate1_transcript.is_reverse
+                        == joint_pairs[j].mate1_transcript.is_reverse
+                    && joint_pairs[i].mate2_transcript.genome_start
+                        == joint_pairs[j].mate2_transcript.genome_start
+                    && joint_pairs[i].mate2_transcript.is_reverse
+                        == joint_pairs[j].mate2_transcript.is_reverse;
+                if same_pos
+                    && joint_pairs[i].combined_wt_score < joint_pairs[j].combined_wt_score
+                    && exons_subset(
+                        &joint_pairs[i].mate2_transcript.exons,
+                        &joint_pairs[j].mate2_transcript.exons,
+                    )
+                {
+                    keep[i] = false;
+                    break;
+                }
+            }
+        }
+        joint_pairs = joint_pairs
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| keep[*i])
+            .map(|(_, p)| p)
+            .collect();
+    }
+
     // STAR does not do per-position score filtering: multMapSelect collects all transcripts
     // within the global scoreRange window without any per-position dedup. Same-position
     // alignments with different CIGARs and scores within scoreRange all count toward NH.
