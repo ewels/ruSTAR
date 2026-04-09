@@ -231,7 +231,8 @@ fn extend_alignment(
             // Break uses full extension length max_extend, not current position i+1
             let total_mm = n_mm_prev + n_mm;
             // STAR uses double comparisons throughout (extendAlign.cpp)
-            let break_limit_f = (p_mm_max * (len_prev + max_extend) as f64).min(n_mm_max as f64);
+            let break_limit_f =
+                (p_mm_max * (len_prev.saturating_add(max_extend)) as f64).min(n_mm_max as f64);
             if total_mm as f64 >= break_limit_f {
                 break;
             }
@@ -536,7 +537,8 @@ pub fn cluster_seeds(
     // STAR resets nWA=0 after window creation, then re-assigns ALL seeds (including
     // anchors) through assignAlignToWindow. We match this by not pre-loading anchors
     // in Phase 2 and processing all seeds here through the same capacity logic.
-    for (seed_idx, seed) in seeds.iter().enumerate() {
+    let mut too_many_anchors = false; // STAR: MARKER_TOO_MANY_ANCHORS_PER_WINDOW
+    'outer: for (seed_idx, seed) in seeds.iter().enumerate() {
         let n_loci = seed.sa_end - seed.sa_start;
         if n_loci == 0 {
             continue;
@@ -670,7 +672,9 @@ pub fn cluster_seeds(
                     .retain(|wa| wa.is_anchor || wa.length > min_non_anchor_len);
 
                 if window.alignments.len() >= seed_per_window_nmax {
-                    continue; // Still full after eviction (all anchors)
+                    // STAR: MARKER_TOO_MANY_ANCHORS_PER_WINDOW → nW=0, abort entire read
+                    too_many_anchors = true;
+                    break 'outer;
                 }
             }
 
@@ -706,6 +710,11 @@ pub fn cluster_seeds(
                 },
             );
         }
+    }
+
+    // STAR: if any window hit MARKER_TOO_MANY_ANCHORS_PER_WINDOW, abort entire read
+    if too_many_anchors {
+        return Vec::new();
     }
 
     // Phase 5: Build SeedCluster output
@@ -794,6 +803,7 @@ fn stitch_align_to_transcript(
     cluster: &SeedCluster,
     junction_db: Option<&crate::junction::SpliceJunctionDb>,
     align_mates_gap_max: u64,
+    _debug_name: &str,
 ) -> Option<WorkingTranscript> {
     let last_exon = wt.exons.last().unwrap();
 
@@ -862,7 +872,7 @@ fn stitch_align_to_transcript(
             last_exon.read_end,
             last_exon.genome_end,
             1,
-            usize::MAX, // DEF_readSeqLengthMax; SPACER stop applies
+            10_000, // DEF_readSeqLengthMax (STAR); SPACER stop applies before this limit
             wt.n_mismatch,
             n_match_m1,
             scorer.n_mm_max,
@@ -1807,6 +1817,7 @@ fn stitch_recurse(
     recursion_count: &mut u32,
     align_mates_gap_max: u64,
     original_is_reverse: bool,
+    debug_name: &str,
 ) {
     const MAX_RECURSION: u32 = 10_000;
 
@@ -2051,6 +2062,7 @@ fn stitch_recurse(
             recursion_count,
             align_mates_gap_max,
             original_is_reverse,
+            debug_name,
         );
     } else {
         // Try stitching this seed onto the existing transcript
@@ -2063,6 +2075,7 @@ fn stitch_recurse(
             cluster,
             junction_db,
             align_mates_gap_max,
+            debug_name,
         ) {
             stitch_recurse(
                 i_a + 1,
@@ -2079,6 +2092,7 @@ fn stitch_recurse(
                 recursion_count,
                 align_mates_gap_max,
                 original_is_reverse,
+                debug_name,
             );
         }
     }
@@ -2111,6 +2125,7 @@ fn stitch_recurse(
             recursion_count,
             align_mates_gap_max,
             original_is_reverse,
+            debug_name,
         );
     }
 }
@@ -2465,6 +2480,7 @@ fn stitch_seeds_core(
         &mut recursion_count,
         align_mates_gap_max,
         stitch_is_reverse,
+        debug_read_name,
     );
 
     if debug {
@@ -2555,6 +2571,21 @@ pub(crate) fn split_working_transcript(
         .map(|e| (e.read_end - e.read_start) as i32)
         .sum();
 
+    // Split junction data at the mate boundary.
+    // Junction index j covers the gap between exon[j] and exon[j+1].
+    // wt1 internal junctions: indices [0, boundary_idx-1)
+    // Boundary junction: index boundary_idx-1 → dropped (it's the inter-mate gap)
+    // wt2 internal junctions: indices [boundary_idx, n_junctions)
+    let n_junctions = wt.junction_motifs.len();
+    let wt1_junc_end = boundary_idx.saturating_sub(1).min(n_junctions);
+    let wt2_junc_start = boundary_idx.min(n_junctions);
+    let wt1_junction_motifs = wt.junction_motifs[..wt1_junc_end].to_vec();
+    let wt1_junction_annotated = wt.junction_annotated[..wt1_junc_end].to_vec();
+    let wt1_junction_shifts = wt.junction_shifts[..wt1_junc_end].to_vec();
+    let wt2_junction_motifs = wt.junction_motifs[wt2_junc_start..].to_vec();
+    let wt2_junction_annotated = wt.junction_annotated[wt2_junc_start..].to_vec();
+    let wt2_junction_shifts = wt.junction_shifts[wt2_junc_start..].to_vec();
+
     let wt1 = WorkingTranscript {
         read_start: mate1_exons.first().map(|e| e.read_start).unwrap_or(0),
         read_end: mate1_exons.last().map(|e| e.read_end).unwrap_or(0),
@@ -2564,10 +2595,10 @@ pub(crate) fn split_working_transcript(
         score: wt1_score,
         n_mismatch: wt.n_mismatch,
         n_gap: wt.n_gap,
-        n_junction: wt.n_junction,
-        junction_motifs: wt.junction_motifs.clone(),
-        junction_annotated: wt.junction_annotated.clone(),
-        junction_shifts: wt.junction_shifts.clone(),
+        n_junction: wt1_junction_motifs.len() as u32,
+        junction_motifs: wt1_junction_motifs,
+        junction_annotated: wt1_junction_annotated,
+        junction_shifts: wt1_junction_shifts,
         n_anchor: wt.n_anchor,
     };
 
@@ -2580,10 +2611,10 @@ pub(crate) fn split_working_transcript(
         score: wt2_score,
         n_mismatch: wt.n_mismatch,
         n_gap: wt.n_gap,
-        n_junction: wt.n_junction,
-        junction_motifs: wt.junction_motifs.clone(),
-        junction_annotated: wt.junction_annotated.clone(),
-        junction_shifts: wt.junction_shifts.clone(),
+        n_junction: wt2_junction_motifs.len() as u32,
+        junction_motifs: wt2_junction_motifs,
+        junction_annotated: wt2_junction_annotated,
+        junction_shifts: wt2_junction_shifts,
         n_anchor: wt.n_anchor,
     };
 

@@ -253,6 +253,13 @@ All 127 position disagreements (100 diff-chr + 27 same-chr) verified as **genuin
 
 **Current PE gap (Phase 16.37):** ruSTAR=8400 vs STAR=8390 (+10 ruSTAR over). ~16 ruSTAR-only FPs (~13 pre-existing, ~3 splice-related, score inflation root cause TBD). ~6 STAR-only mates. See `docs/star_comparison/DIFFERENCES.md`.
 
+**Phase 16.41 (junction split fix, 2026-04-09):**
+Root cause: `split_working_transcript` copied ALL junction data (including the inter-mate cross-iFrag boundary junction) to BOTH halves. Single-exon mates with `n_junction>0` triggered the spliced-mate mapped length check (`total_mapped >= 0.66*readLen`), failing mates with only 78 matched bases (78 < 99).
+
+Fix: split junction arrays at `boundary_idx`. wt1 (first `boundary_idx` exons) gets junctions `[0..boundary_idx-1)`, wt2 gets junctions `[boundary_idx..n_junctions)`. The boundary junction at index `boundary_idx-1` (canonSJ=-3, inter-mate gap) is dropped from both halves.
+
+Result: `ERR12389696.1783008` **FIXED** (STAR-only → now correctly mapped: mate2 `2S78M70S`, mate1 `18S78M86N54M` at XVI:678116). Also correctly filtered 3-4 former FPs. Net: 8392→8389 ruSTAR vs STAR 8390 (-1 gap). 2 ruSTAR FPs remain, 3 STAR-only remain (pre-existing multi-mappers). SE: unchanged 8795/8925.
+
 ---
 
 ## Debugging Tools

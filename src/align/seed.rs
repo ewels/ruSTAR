@@ -89,6 +89,16 @@ impl Seed {
             &mut seeds,
         )?;
 
+        // STAR's storeAligns dedup: same rStart + same Length → skip duplicate.
+        // Multiple istart chains can find the same (read_pos, length, direction) seed.
+        // Keep only the first occurrence (identical SA ranges guaranteed by same sequence).
+        // Matches STAR's OPTIM_STOREaligns_SIMPLE: `if (PC[iP][PC_rStart]==rStart) &&
+        // PC[iP][PC_Length]==L) return; //same alignment as before, do not store!`
+        {
+            let mut seen = std::collections::HashSet::new();
+            seeds.retain(|s| seen.insert((s.read_pos, s.length, s.search_rc)));
+        }
+
         Ok(seeds)
     }
 

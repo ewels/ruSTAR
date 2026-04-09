@@ -564,21 +564,6 @@ fn build_combined_read(mate1: &[u8], mate2: &[u8]) -> Vec<u8> {
     v
 }
 
-/// Assign mate_id to seeds found on the combined read.
-///
-/// Both L→R and R→L seeds: after find_seeds() converts R→L read_pos to combined-read
-/// (L→R) space (seed.rs line 261-262), seed.read_pos is in original combined-read space for all.
-/// combined = [mate1(0..len1)][SPACER][RC(mate2)(len1+1..)]
-///   read_pos < len1  → mate_id=0 (mate1)
-///   read_pos > len1  → mate_id=1 (mate2 RC portion)
-fn assign_seed_mate_ids(seeds: &mut Vec<Seed>, len1: usize, _len2: usize) {
-    for seed in seeds.iter_mut() {
-        seed.mate_id = if seed.read_pos < len1 { 0 } else { 1 };
-    }
-    // Drop any seed that spans the spacer (read_pos == len1 in combined-read space).
-    // This is a guard — the spacer byte=11 is not in the genome, so no seed should span it.
-    seeds.retain(|s| s.read_pos != len1);
-}
 
 /// Align paired-end reads using STAR's joint combined-read approach (Phase 16.11).
 ///
@@ -630,8 +615,29 @@ pub fn align_paired_read(
 
     let debug_pe = !params.read_name_filter.is_empty() && read_name == params.read_name_filter;
 
-    let mut seeds = Seed::find_seeds(&combined, index, params.seed_map_min, params, "")?;
-    assign_seed_mate_ids(&mut seeds, len1, len2);
+    // STAR-faithful per-mate seeding: seed each mate independently (matching STAR's splitR
+    // per-piece approach). Seeding the full 301bp combined read uses Nstart=7 with chains that
+    // cross the M1/M2 boundary, finding false seeds that STAR never encounters. STAR seeds
+    // piece[0]=mate1 (Nstart=4) and piece[1]=mate2 (Nstart=4) separately, then combines WA
+    // entries for stitching. We replicate this by seeding mate1_seq and rc_mate2 separately.
+    let seeds = {
+        // Seed mate1 portion: combined positions [0, len1)
+        let mut s1 = Seed::find_seeds(mate1_seq, index, params.seed_map_min, params, "")?;
+        for seed in &mut s1 {
+            seed.mate_id = 0;
+            // read_pos already in [0, len1) — correct combined-read coordinates
+        }
+        // Seed mate2 portion: combined positions [len1+1, len1+1+len2)
+        // rc_mate2 = RC(mate2) = combined[len1+1..], so seeding rc_mate2 gives seeds in [0, len2)
+        // that map to combined positions [len1+1, len1+1+len2) after adjustment.
+        let mut s2 = Seed::find_seeds(&rc_mate2, index, params.seed_map_min, params, "")?;
+        for seed in &mut s2 {
+            seed.mate_id = 1;
+            seed.read_pos += len1 + SPACER_LEN; // Convert rc_mate2-local to combined-read coords
+        }
+        s1.extend(s2);
+        s1
+    };
 
     if debug_pe {
         eprintln!(
@@ -742,23 +748,6 @@ pub fn align_paired_read(
                             .saturating_sub(wt.exons.first().unwrap().genome_start);
                         let length_penalty = scorer.genomic_length_penalty(g_span);
                         let adjusted_score = (wt.score + length_penalty).max(0);
-                        // Log near-threshold failures: reads where the genomicLength penalty
-                        // causes the score to fall below threshold. These are the ~35 regression
-                        // reads introduced by Phase 16.31. Fires for any read pair, not just debug.
-                        if wt.score >= combined_score_threshold
-                            && adjusted_score < combined_score_threshold
-                        {
-                            eprintln!(
-                                "[NEAR-THRESHOLD-FWD] {} raw={} penalty={} adj={} threshold={} n_exons={} gspan={}",
-                                read_name,
-                                wt.score,
-                                length_penalty,
-                                adjusted_score,
-                                combined_score_threshold,
-                                wt.exons.len(),
-                                g_span
-                            );
-                        }
                         if adjusted_score < combined_score_threshold {
                             continue;
                         }
@@ -975,44 +964,10 @@ pub fn align_paired_read(
                         .saturating_sub(wt.exons.first().unwrap().genome_start);
                     let length_penalty = scorer.genomic_length_penalty(g_span);
                     let adjusted_score = (wt.score + length_penalty).max(0);
-                    if wt.score >= combined_score_threshold
-                        && adjusted_score < combined_score_threshold
-                    {
-                        eprintln!(
-                            "[NEAR-THRESHOLD-REV] {} raw={} penalty={} adj={} threshold={} n_exons={} gspan={}",
-                            read_name,
-                            wt.score,
-                            length_penalty,
-                            adjusted_score,
-                            combined_score_threshold,
-                            wt.exons.len(),
-                            g_span
-                        );
-                    }
                     if adjusted_score < combined_score_threshold {
                         continue;
                     }
                     let combined_wt_score = adjusted_score;
-                    if debug_pe {
-                        eprintln!(
-                            "[RUSTAR-FINALIZE-PREEXT-REV] raw={} penalty={} adj={} n_exons={} n_mismatch={}",
-                            wt.score,
-                            length_penalty,
-                            adjusted_score,
-                            wt.exons.len(),
-                            wt.n_mismatch
-                        );
-                        for (i, e) in wt.exons.iter().enumerate() {
-                            eprintln!(
-                                "[RUSTAR-FINALIZE-EXON-REV[{}]] rStart={} gStart={} len={} iFrag={}",
-                                i,
-                                e.read_start,
-                                e.genome_start,
-                                e.read_end - e.read_start,
-                                e.mate_id
-                            );
-                        }
-                    }
                     // Pre-split combined-read coverage: mirrors STAR's nMatch on the joint
                     // combined transcript (used in mappedFilter). Stitch_read for reverse cluster
                     // is [mate2_fwd | SPACER_RC | RC(mate1_fwd)]; exon read spans cover same range.
@@ -1181,7 +1136,30 @@ pub fn align_paired_read(
         }
     }
 
-    // --- Decision tree: dedup, sort, score-filter joint pairs, then fallbacks ---
+    // --- Decision tree: score-filter, dedup, quality-filter joint pairs, then fallbacks ---
+    // STAR ordering: multMapSelect (score-range filter → nTr count → TooManyLoci check) then
+    // position dedup then mappedFilter (quality checks). STAR's nTr is the count AFTER
+    // score-range filter but BEFORE position dedup. Using the post-dedup count would give
+    // fewer pairs than STAR and miss TooManyLoci cases where dedup merges distinct copies.
+
+    // Step 1: score-range filter (STAR's multMapSelect). Combined WT score (pre-split, post
+    // genomic length penalty) is used so extendAlign equalization doesn't inflate pair scores.
+    if !joint_pairs.is_empty() {
+        let best_score = joint_pairs
+            .iter()
+            .map(|pa| pa.combined_wt_score)
+            .max()
+            .unwrap_or(0);
+        let score_threshold = best_score - params.out_filter_multimap_score_range;
+        joint_pairs.retain(|pa| pa.combined_wt_score >= score_threshold);
+    }
+
+    // Step 2: TooManyLoci check using pre-dedup count = STAR's nTr.
+    if joint_pairs.len() > params.out_filter_multimap_nmax as usize {
+        return Ok((Vec::new(), 0, Some(UnmappedReason::TooManyLoci)));
+    }
+
+    // Step 3: position dedup — keep highest-scoring pair per (chr, mate1_pos, mate2_pos).
     joint_pairs.sort_by(|a, b| {
         (
             a.mate1_transcript.chr_idx,
@@ -1225,28 +1203,9 @@ pub fn align_paired_read(
                     .cmp(&b.mate1_transcript.is_reverse)
             })
     });
-    if !joint_pairs.is_empty() {
-        // STAR's stitchWindowAligns score-range filter uses the combined WT score (post genomic
-        // length penalty) to rank and filter multi-mappers. Using per-mate finalized scores
-        // (t1.score + t2.score) fails because finalize_transcript's extendAlign can equalize
-        // scores across spurious splice pairs: all paired transcripts get the same per-mate score
-        // even when their combined WT scores differ by 4-5 points (e.g., a spurious 144kb intron
-        // pair scores wt=288 vs correct unspliced wt=292, but both produce mate scores of 148+146).
-        let best_score = joint_pairs
-            .iter()
-            .map(|pa| pa.combined_wt_score)
-            .max()
-            .unwrap_or(0);
-        let score_threshold = best_score - params.out_filter_multimap_score_range;
-        joint_pairs.retain(|pa| pa.combined_wt_score >= score_threshold);
-    }
-    filter_paired_transcripts(&mut joint_pairs, params);
 
-    // STAR mappedFilter: nBestMate > outFilterMultimapNmax → unmapped(multi).
-    // Applied after score-range filter and quality filter, same as STAR's mappedFilter ordering.
-    if joint_pairs.len() > params.out_filter_multimap_nmax as usize {
-        return Ok((Vec::new(), 0, Some(UnmappedReason::TooManyLoci)));
-    }
+    // Step 4: quality filter (STAR's mappedFilter score/match/mismatch checks).
+    filter_paired_transcripts(&mut joint_pairs, params);
 
     // 1. BothMapped from joint combined-read path
     if !joint_pairs.is_empty() {
