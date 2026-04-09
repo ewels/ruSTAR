@@ -32,7 +32,7 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Status
 
-**268 tests passing, 0 clippy warnings.** SE: 99.7% position agreement (adjusted), 99.9% CIGAR (pos-agreeing), 2.2% splice rate (STAR: 2.2%), 66 shared junctions, **100.0% MAPQ agreement, MAPQ inflation: 0, deflation: 0**. 127 position disagreements (ALL verified as genuine ties). 1 CIGAR-only disagree (ERR12389696.13573895, insertion placement, seed-level tie). **1 truly actionable SE issue remains** (CIGAR insertion placement only — the other 2 previously listed are resolved). PE: **8400/8390 both-mapped (+10 ruSTAR over STAR)**, 0 half-mapped, ~16 ruSTAR-only FPs, 98.9% per-mate position agreement (Phase 16.38: STAR-faithful filter ordering). See [ROADMAP.md](ROADMAP.md) for detailed phase tracking and [docs/](docs/) for per-phase notes.
+**268 tests passing, 0 clippy warnings.** SE: 99.7% position agreement (adjusted), 99.9% CIGAR (pos-agreeing), 2.2% splice rate (STAR: 2.2%), 66 shared junctions, **100.0% MAPQ agreement, MAPQ inflation: 0, deflation: 0**. 127 position disagreements (ALL verified as genuine ties). 1 CIGAR-only disagree (ERR12389696.13573895, insertion placement, seed-level tie). **1 truly actionable SE issue remains** (CIGAR insertion placement only). PE: **8390/8390 both-mapped (0 gap, exact STAR match)**, 0 half-mapped, 24 MAPQ inflations, **0 MAPQ deflations**, 98.784% PE faithfulness (Phase 16.45: split_working_transcript junction split fix). See [ROADMAP.md](ROADMAP.md) for detailed phase tracking and [docs/](docs/) for per-phase notes.
 
 ## Source Layout
 
@@ -159,15 +159,13 @@ Previously listed issues now resolved:
 
 See [ROADMAP.md](ROADMAP.md) and [docs/](docs/) for full issue tracking.
 
-## PE Status (Updated 2026-04-01 — Phase 16.36)
+## PE Status (Updated 2026-04-09 — Phase 16.45)
 
-**Phase 16.36** (post-finalization dedup) is the latest. Current PE parity: ruSTAR=8400 vs STAR=8390, ruSTAR +10 over STAR.
+**Phase 16.45** (split_working_transcript junction split fix): **PE both-mapped = 8390/8390 (exact STAR match)**. PE MAPQ deflations: **16 → 0**. PE faithfulness: 98.784%.
 
-**Phase 16.33** fixed zero-insert RF pairs (e.g. `ERR12389696.10454315`) by adding `no_left_ext: bool` to `finalize_transcript`. Two cascading bugs were fixed:
-1. **extlen signed arithmetic** (`stitch_align_to_transcript`): when `wa.sa_pos < first_exon.genome_start`, old unsigned code fell back to `wa.read_pos` (gave extlen=198→2-base extension). Fixed to signed i64 = STAR's `gBstart - EX_G + EX_R` formula (gives extlen=1).
-2. **mate2 left-extension suppression** (`finalize_transcript`): after split, wt2.read_start=46; per-mate finalize tried to extend leftward 46 bases into adapter, spuriously matching 1 adapter base. Added `no_left_ext: bool` param; pass `true` for mate2 (fwd cluster) and rc_mate1 (rev cluster).
+**Root cause fixed**: `split_working_transcript` used `wt2_junc_start = boundary_idx.min(n_junctions)` to partition junction_shifts between the two mate portions. Since the inter-mate boundary does NOT produce a junction entry, the index offset was wrong: any junctions belonging to the second portion with index < boundary_idx were silently discarded. Fix: use `wt2_junc_start = wt1_junc_end` (junction split point = number of junctions in the first portion). For the specific case boundary_idx=1 (one mate2 exon in reverse cluster), wt1_junc_end=0 but wt2_junc_start was incorrectly set to 1, causing the 145907N junction's shift (jj_r=8) to be lost. finalize_transcript's overhang check then saw empty junction_shifts and passed the spurious 139M145907N11M alignment (11 < threshold 5+8=13 → should have been rejected).
 
-**Current PE parity**: ruSTAR=8400 vs STAR=8390. ruSTAR +10 over STAR. ~16 ruSTAR-only FPs (~13 pre-existing non-splice reads, ~3 splice-related). 6 STAR-only mates. 75 diff-chr disagreements per mate (unavoidable multi-mapper ties), ~21-24 same-chr per mate (some fixable).
+**Current PE parity**: ruSTAR=8390, STAR=8390, **0 gap**. 2 ruSTAR-only FPs (.17779410, .6302610). 2 STAR-only mates (.18919121 half-mapped, .6302610 half-mapped). 24 MAPQ inflations (rDNA/repeat multi-mappers). 0 MAPQ deflations.
 
 ## Remaining Limitations (Top 5)
 

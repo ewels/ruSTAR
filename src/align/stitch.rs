@@ -2572,13 +2572,19 @@ pub(crate) fn split_working_transcript(
         .sum();
 
     // Split junction data at the mate boundary.
-    // Junction index j covers the gap between exon[j] and exon[j+1].
-    // wt1 internal junctions: indices [0, boundary_idx-1)
-    // Boundary junction: index boundary_idx-1 → dropped (it's the inter-mate gap)
-    // wt2 internal junctions: indices [boundary_idx, n_junctions)
+    // Junction entries record only SPLICE JUNCTIONS (del >= alignIntronMin); the inter-mate
+    // gap (mate boundary) does NOT produce an entry. So we cannot derive the split index by
+    // counting exon pairs — the mate boundary "consumes" an exon pair slot but no junction slot.
+    //
+    // Correct split: wt1 (first part) gets junctions [0, wt1_junc_end), and wt2 (second part)
+    // gets junctions [wt1_junc_end, n_junctions). Using wt1_junc_end as the start for wt2 ensures
+    // no junctions are lost or duplicated regardless of where the mate boundary falls.
+    //
+    // wt1_junc_end = min(boundary_idx - 1, n_junctions): the first part has at most boundary_idx-1
+    // consecutive exon pairs (capped at total junctions), each potentially a splice junction.
     let n_junctions = wt.junction_motifs.len();
     let wt1_junc_end = boundary_idx.saturating_sub(1).min(n_junctions);
-    let wt2_junc_start = boundary_idx.min(n_junctions);
+    let wt2_junc_start = wt1_junc_end;
     let wt1_junction_motifs = wt.junction_motifs[..wt1_junc_end].to_vec();
     let wt1_junction_annotated = wt.junction_annotated[..wt1_junc_end].to_vec();
     let wt1_junction_shifts = wt.junction_shifts[..wt1_junc_end].to_vec();
