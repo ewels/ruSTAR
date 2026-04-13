@@ -143,7 +143,7 @@ pub fn align_read(
             read_name,
             clusters.len()
         );
-        for (i, cluster) in clusters.iter().take(10).enumerate() {
+        for (i, cluster) in clusters.iter().enumerate() {
             let chr_name = if cluster.chr_idx < index.genome.chr_name.len() {
                 &index.genome.chr_name[cluster.chr_idx]
             } else {

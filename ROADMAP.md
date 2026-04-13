@@ -51,7 +51,7 @@ Paired-end (Phase 8) builds on threaded infrastructure. GTF/junctions (Phase 7) 
 | 12 | Chimeric Detection | ✅ | 170 | SE chimeric, Chimeric.out.junction |
 | [13](docs/phase13_accuracy.md) | Performance + Accuracy | ✅ | 205 | 94.5% pos, 97.8% CIGAR, 2.1% splice |
 | [15](docs/phase15_sam_tags.md) | SAM Tags + PE Fix | ✅ | 235 | NH/HI/AS/NM/nM/XS/jM/jI/MD, PE fix |
-| [16](docs/phase16_algorithm.md) | Algorithm Parity | ✅* | 268 | SE: 99.7% pos, 2.2% splice, **MAPQ 100%**; PE: **8390/8390 (0 gap)**, 99.0% per-mate pos, 98.9% CIGAR, **0 MAPQ deflations**; faithfulness: SE 98.57%, PE 98.78%, SJ 96.97% (Phase 16.45) |
+| [16](docs/phase16_algorithm.md) | Algorithm Parity | ✅* | 268 | SE: 99.7% pos, 2.2% splice, **MAPQ 100%**; PE: **8390/8390 (0 gap)**, 99.0% per-mate pos, 98.9% CIGAR, **6 MAPQ inflations**, 0 deflations; faithfulness: SE 98.57%, PE 98.89%, SJ 96.97% (Phase 16.48) |
 | [17](docs/phase17_features.md) | Features + Polish | ✅* | 268 | Log.final.out, clippy cleanup, sorted BAM planned |
 | 14 | STARsolo | DEFERRED | — | Waiting for accuracy parity |
 
@@ -197,68 +197,56 @@ See [docs/phase16_algorithm.md](docs/phase16_algorithm.md) for sub-phase notes (
 
 **Adjusted SE summary (post Phase 16.29)**: 99.7% position agreement, 99.9% CIGAR, 2.2% splice rate (= STAR), 99.9% MAPQ, 26 actionable disagreements, 1 STAR-only / 1 ruSTAR-only. MAPQ inflation: 4 reads, MAPQ deflation: 4 reads.
 
-**PE parity (10k yeast pairs, 150 bp, post Phase 16.31):**
+**PE parity (10k yeast pairs, 150 bp, post Phase 16.48):**
 
 | Metric | ruSTAR | STAR |
 |--------|--------|------|
-| Both-mapped pairs | 8245 | 8390 |
+| Both-mapped pairs | **8390** | 8390 |
 | Half-mapped pairs | 0 | 0 |
-| Net gap | −145 (ruSTAR under) | — |
-| Per-mate position agreement | ~98.0% | — |
-| Per-mate CIGAR agreement | ~96.7% | — |
-| ruSTAR-only false positives | 12 | — |
-| STAR-only missed | 157 | — |
+| Net gap | **0 (exact match)** | — |
+| Per-mate position agreement | **99.0%** | — |
+| Per-mate CIGAR agreement | **98.9%** | — |
+| Faithfulness (pos+CIGAR+MAPQ+proper+NH) | **98.891%** | — |
+| ruSTAR-only false positives | 2 | — |
+| STAR-only missed | 2 | — |
+| MAPQ inflations | 6 (rDNA/repeat) | — |
+| MAPQ deflations | **0** | — |
 
-**PE implementation path:**
-- Phase 16.PE1: Recursive combinatorial stitcher (`stitch_recurse`) replacing forward DP
-- Phase 16.PE2: STAR-faithful combined-read approach `[mate1_fwd][SPACER][RC(mate2)]`; `mate_id` tagging; `split_working_transcript`; overlap consistency checks
-- Phase 16.PE3: Removed non-STAR independent SE + cross-product path; decision tree: joint pairs only → TooShort/unmapped
-- Score threshold fix: `split_working_transcript` copies `wt.score` to both halves; checking `wt1.score+wt2.score` doubled the threshold. Fixed to check `wt.score < combined_score_threshold` before split.
-- Phase 16.28: extendAlign EXTEND_ORDER fix — for reverse-strand alignments, extend right (5' of read) before left.
-- Phase 16.30: PE overlap check fix — forward cluster check 1 uses post-extension estimate for mate1 genome start.
-- D5 (2026-03-12): Overlapping-mate junction consistency check (`pe_junctions_consistent`). Removed 2 false-positive pairs where splice junctions in the overlapping genome region disagreed between mates.
-- Palindromic early-exit removed (2026-03-16): `if mate1_seq == rc_mate2 { return TooShort }` was wrong — STAR maps palindromic zero-insert RF pairs. Recovered ~28 pairs.
-
-**Phase 16.31 (2026-03-25):** Applied `scoreGenomicLengthLog2scale` penalty to combined PE WT score before threshold check (`stitchWindowAligns.cpp:262-265`). `penalty = ceil(log2(gspan) * -0.25 - 0.5)`, typically -2. Reuses `scorer.genomic_length_penalty()`. Fixed 132/144 FPs (144->12). Created 35 new STAR-only misses (122->157) -- latent scoring discrepancy for borderline pairs.
-
-**Phase 16.32 (2026-03-26):** Added `outFilterMultimapNmax` check for PE joint pairs after `filter_paired_transcripts`. If `joint_pairs.len() > outFilterMultimapNmax`, return `TooManyLoci`. Mechanism is correct but blocked for all 12 remaining FPs by upstream scoring inflation that shifts the score-range filter to retain only 1 pair instead of the 12+ needed to trigger the check. Root cause: ruSTAR combined WT score is 36-106 points higher than STAR's finalized combined WT score for these overlapping/repeat-region pairs.
-
-**PE false positives -- updated status (2026-03-26):**
-
-Of the original 144 FPs, 132 were fixed by the `scoreGenomicLengthLog2scale` penalty (Phase 16.31). 12 FPs remain. All 12 are blocked by combined-WT score inflation (36-106 pts above STAR). Root cause analysis:
-- 9 FPs: STAR combined WT score 109-193 < 198 threshold (ruSTAR 203-264 > 198). Score inflation ≈ 36-106 pts.
-- 2 FPs (2243566, 21434027): STAR nW=0 (no seed windows found); ruSTAR finds 16 and 3 joint_pairs.
-- 1 FP (9495507): STAR nTr=12 > outFilterMultimapNmax=10; ruSTAR score-range filter collapses 55→1 pair due to 2-pt inflation at one locus (chr15:14191228 M1 scores 143 vs tied 141 elsewhere).
-
-**Remaining PE gap:** 12 ruSTAR-only false positives, 157 STAR-only missed (35 post-16.31 regressions + 122 pre-existing). See `docs/star_comparison/DIFFERENCES.md`.
+**PE implementation path (summary):**
+- 16.PE1: Recursive combinatorial stitcher
+- 16.PE2: STAR-faithful combined-read `[mate1_fwd][SPACER][RC(mate2)]` + `split_working_transcript`
+- 16.PE3: Removed non-STAR cross-product path
+- 16.28: extendAlign EXTEND_ORDER fix (5' of read first)
+- 16.30: PE overlap check fix (post-extension estimate)
+- 16.31: `scoreGenomicLengthLog2scale` penalty on combined WT score
+- 16.33: no_left_ext + extlen signed arithmetic
+- 16.34: stitch_recurse eviction (STAR-faithful cap)
+- 16.35: rGap jR coordinate convention fix
+- 16.36: post-finalization dedup (strict `<` score)
+- 16.38: STAR-faithful filter ordering (multMapSelect → mappedFilter)
+- 16.40: seed dedup + MARKER_TOO_MANY_ANCHORS_PER_WINDOW
+- 16.41: split_working_transcript junction split fix
+- 16.42: NM→nM tag + PE AS = combined_wt_score
+- 16.43: SJ overhang excludes soft clips
+- 16.44: PE pos+CIGAR dedup two-pass
+- 16.45: split_working_transcript wt2_junc_start bug fix — **0 gap achieved**
+- 16.46: removed per-position score dedup pass (STAR has no such filter); 24→6 MAPQ inflations
+- 16.47: PE mate2-subset dedup mate1.genome_end guard; 2→0 MAPQ deflations
+- 16.48: STAR-faithful TLEN formula; 808→38 TLEN diffs
+- D5: `pe_junctions_consistent` check wired into joint paths
 
 **Position disagreement reclassification (2026-04-01):**
 
-All 127 position disagreements (100 diff-chr + 27 same-chr) verified as **genuine ties** via STAR debug tracing. Both tools find identical alignment sets; difference is only primary selection order based on SA iteration.
+All 127 SE position disagreements (100 diff-chr + 27 same-chr) verified as **genuine ties** via STAR debug tracing. Both tools find identical alignment sets; difference is only primary selection order based on SA iteration.
 
-**Phase 16.37 (alignIntronMax=0 fix, 2026-04-02):**
-- `ERR12389696.5825571` **FIXED**: alignIntronMax=0 should mean no limit (STAR: `if Del>alignIntronMax && alignIntronMax>0`). ruSTAR used finite limit 589824; fixed to `u32::MAX`. Now aligns as `XV:80779 121M607028N13M16S` (607kb intron, exact STAR match).
-- `ERR12389696.16030539` **MAPQ FIXED**: Both tools now find XV:121224 and XV:598336 with MAPQ=3. Differs only in primary tie-breaking. MAPQ inflate: 1→0.
-- `ERR12389696.13573895`: Investigated. Root cause is seed-level tie in homopolymer region — 71-base seed found at RC pos 29 (ruSTAR) vs 37 (STAR). Both score AS=133. Insertion placement differs (100 vs 108). Not fixable without matching STAR's exact Lmapped chain traversal.
-
-**Remaining fixable SE issues (deferred):**
+**Remaining fixable issues:**
 
 | Issue | Count | Difficulty |
 |-------|-------|------------|
-| CIGAR insertion placement | 1 | Hard — `ERR12389696.13573895` (AS=133 both, same pos, seed-level tie in homopolymer) |
-| ruSTAR false splice (adapter contamination, 279 kb intron) | 1 | Medium — `ERR12389696.18296181` |
-| STAR-only mapped (high-mismatch read NM=10) | 1 | Unknown — `ERR12389696.13766843` |
-| MAPQ inflation | 0 | **FIXED Phase 16.37** |
-| MAPQ deflation | 0 | **FIXED Phase 16.36** |
-
-**Current PE gap (Phase 16.37):** ruSTAR=8400 vs STAR=8390 (+10 ruSTAR over). ~16 ruSTAR-only FPs (~13 pre-existing, ~3 splice-related, score inflation root cause TBD). ~6 STAR-only mates. See `docs/star_comparison/DIFFERENCES.md`.
-
-**Phase 16.41 (junction split fix, 2026-04-09):**
-Root cause: `split_working_transcript` copied ALL junction data (including the inter-mate cross-iFrag boundary junction) to BOTH halves. Single-exon mates with `n_junction>0` triggered the spliced-mate mapped length check (`total_mapped >= 0.66*readLen`), failing mates with only 78 matched bases (78 < 99).
-
-Fix: split junction arrays at `boundary_idx`. wt1 (first `boundary_idx` exons) gets junctions `[0..boundary_idx-1)`, wt2 gets junctions `[boundary_idx..n_junctions)`. The boundary junction at index `boundary_idx-1` (canonSJ=-3, inter-mate gap) is dropped from both halves.
-
-Result: `ERR12389696.1783008` **FIXED** (STAR-only → now correctly mapped: mate2 `2S78M70S`, mate1 `18S78M86N54M` at XVI:678116). Also correctly filtered 3-4 former FPs. Net: 8392→8389 ruSTAR vs STAR 8390 (-1 gap). 2 ruSTAR FPs remain, 3 STAR-only remain (pre-existing multi-mappers). SE: unchanged 8795/8925.
+| SE CIGAR insertion placement | 1 | Hard — `ERR12389696.13573895` (AS=133 both, same pos, homopolymer seed-level tie) |
+| PE MAPQ inflation | 6 | Hard — root cause: STAR uses bin-only window key; ruSTAR uses (strand,bin). Architectural fix required (Phase 17+). |
+| PE ruSTAR-only FPs | 2 | TBD — `.17779410` (616kb spurious intron), `.6302610` |
+| PE STAR-only | 2 | TBD — `.18919121`, `.6302610` |
 
 ---
 
