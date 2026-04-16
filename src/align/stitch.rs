@@ -2569,7 +2569,7 @@ fn stitch_seeds_core(
     // With anchor-only filtering, this limit is rarely hit, but keep as a safety net.
     const MAX_WA_ENTRIES: usize = 200;
     if wa_entries.len() > MAX_WA_ENTRIES {
-        wa_entries.sort_by(|a, b| b.length.cmp(&a.length));
+        wa_entries.sort_by_key(|wa| std::cmp::Reverse(wa.length));
         wa_entries.truncate(MAX_WA_ENTRIES);
         wa_entries.sort_by(|a, b| a.read_pos.cmp(&b.read_pos).then(b.length.cmp(&a.length)));
     }
