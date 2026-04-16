@@ -258,6 +258,7 @@ mod tests {
                 n_rep: 1,
                 is_anchor: true,
                 mate_id: 2,
+                pre_ext_score: (genome_end - genome_start) as i32,
             }],
             chr_idx,
             genome_start,

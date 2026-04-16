@@ -325,6 +325,10 @@ pub struct WindowAlignment {
     pub is_anchor: bool,
     /// Mate ID: 0=mate1, 1=mate2, 2=SE (STAR: PC[iP][PC_iFrag] / WA[iW][iS][WA_iFrag])
     pub mate_id: u8,
+    /// Pre-computed extension score estimate (STAR: scoreSeedBest[iS] base case).
+    /// = length + left_ext_score + right_ext_score (in stitch coords, forward strand).
+    /// Computed in stitch_seeds_core after dedup/sort. Default: length as i32.
+    pub pre_ext_score: i32,
 }
 
 /// A cluster of seeds mapping to the same genomic region
@@ -777,6 +781,7 @@ pub fn cluster_seeds(
                             n_rep: n_loci,
                             is_anchor: is_anchor_seed,
                             mate_id: seed.mate_id,
+                            pre_ext_score: length as i32,
                         },
                     );
                 }
@@ -844,6 +849,7 @@ pub fn cluster_seeds(
                     n_rep: n_loci,
                     is_anchor: is_anchor_seed,
                     mate_id: seed.mate_id,
+                    pre_ext_score: length as i32,
                 },
             );
         }
@@ -2599,6 +2605,135 @@ fn stitch_seeds_core(
     // Find last anchor index for the anchor constraint
     let last_anchor_idx = wa_entries.iter().rposition(|wa| wa.is_anchor);
 
+    // --- STAR stitchWindowSeeds.cpp: scoreSeedBest pre-extension ---
+    //
+    // Phase 1: Pre-extend each seed left and right (base case of scoreSeedBest DP).
+    // Uses stitch_read (forward strand, forward genome coords after coord conversion above).
+    // EXTEND_ORDER=1: for forward reads, left extension first (5' of read), then right.
+    //                 for reverse reads, right extension first (5' of read in RC), then left.
+    // This matches stitch_recurse's `do_left_first = !original_is_reverse`.
+    // Mismatch budget for second ext carries over from first ext (STAR: scoreSeedBestMM[iS1]).
+    {
+        let zero_ext = ExtendResult { extend_len: 0, max_score: 0, n_mismatch: 0 };
+        let do_left_first = !stitch_is_reverse;
+        for wa in &mut wa_entries {
+            let right_start = wa.read_pos + wa.length;
+
+            let (first_ext, second_ext) = if do_left_first {
+                // Forward cluster: left ext first, then right
+                let left = if wa.read_pos > 0 {
+                    extend_alignment(
+                        stitch_read,
+                        wa.read_pos,
+                        wa.sa_pos,
+                        -1,
+                        wa.read_pos,
+                        0,
+                        wa.length,
+                        scorer.n_mm_max,
+                        scorer.p_mm_max,
+                        index,
+                        false,
+                    )
+                } else {
+                    zero_ext.clone()
+                };
+                let right_len_prev = wa.length + left.extend_len;
+                let right = if right_start < stitch_read.len() {
+                    extend_alignment(
+                        stitch_read,
+                        right_start,
+                        wa.sa_pos + wa.length as u64,
+                        1,
+                        stitch_read.len() - right_start,
+                        left.n_mismatch,
+                        right_len_prev,
+                        scorer.n_mm_max,
+                        scorer.p_mm_max,
+                        index,
+                        false,
+                    )
+                } else {
+                    zero_ext.clone()
+                };
+                (left, right)
+            } else {
+                // Reverse cluster: right ext first (5' of RC read), then left
+                let right = if right_start < stitch_read.len() {
+                    extend_alignment(
+                        stitch_read,
+                        right_start,
+                        wa.sa_pos + wa.length as u64,
+                        1,
+                        stitch_read.len() - right_start,
+                        0,
+                        wa.length,
+                        scorer.n_mm_max,
+                        scorer.p_mm_max,
+                        index,
+                        false,
+                    )
+                } else {
+                    zero_ext.clone()
+                };
+                let left_len_prev = wa.length + right.extend_len;
+                let left = if wa.read_pos > 0 {
+                    extend_alignment(
+                        stitch_read,
+                        wa.read_pos,
+                        wa.sa_pos,
+                        -1,
+                        wa.read_pos,
+                        right.n_mismatch,
+                        left_len_prev,
+                        scorer.n_mm_max,
+                        scorer.p_mm_max,
+                        index,
+                        false,
+                    )
+                } else {
+                    zero_ext.clone()
+                };
+                (left, right)
+            };
+
+            wa.pre_ext_score = wa.length as i32 + first_ext.max_score + second_ext.max_score;
+        }
+    }
+
+    // Phase 2: DP chain over pre-extended scores (STAR: scoreSeedBest chain accumulation).
+    // dp[i] = best chain score ending at wa_entries[i].
+    // For intra-read gaps: if read_gap != genome_gap this is a potential splice — 0 penalty.
+    // For exact-match gaps (read_gap == genome_gap): score the gap as mismatches only
+    // (lenient: use 0 since exact-match gaps are handled by the actual DP later).
+    // Both cases produce an overestimate — conservative upper bound matching STAR's approach.
+    let best_pre_score = {
+        let mut dp: Vec<i32> = wa_entries.iter().map(|wa| wa.pre_ext_score).collect();
+        for i in 1..wa_entries.len() {
+            for j in 0..i {
+                let rj_end = wa_entries[j].read_pos + wa_entries[j].length;
+                let gj_end = wa_entries[j].sa_pos + wa_entries[j].length as u64;
+                // Must not overlap in read or genome
+                if wa_entries[i].read_pos < rj_end || wa_entries[i].sa_pos < gj_end {
+                    continue;
+                }
+                // Gap penalty: 0 for potential splices (read_gap != genome_gap) or short gaps
+                // This prevents underestimating spliced reads whose per-seed pre_ext_score is
+                // limited by the splice junction (extension stops at the intron boundary).
+                let chain = dp[j] + wa_entries[i].pre_ext_score;
+                if chain > dp[i] {
+                    dp[i] = chain;
+                }
+            }
+        }
+        dp.into_iter().max().unwrap_or(0)
+    };
+
+    // Note: scoreSeedBest (best_pre_score) is used by STAR for seed ordering within
+    // stitchWindowAligns, NOT as a hard pre-filter gate. We keep pre_ext_score on each WA
+    // entry for future use in seed ordering (Phase B), but do not filter here.
+    let _ = best_pre_score; // suppress unused warning
+
     // Run recursive include/exclude stitcher
     let mut working_transcripts: Vec<WorkingTranscript> = Vec::new();
     let mut recursion_count: u32 = 0;
@@ -2923,6 +3058,7 @@ mod tests {
                 n_rep: 1,
                 is_anchor: true,
                 mate_id: 2,
+                pre_ext_score: 5,
             },
             WindowAlignment {
                 seed_idx: 1,
@@ -2933,6 +3069,7 @@ mod tests {
                 n_rep: 1,
                 is_anchor: true,
                 mate_id: 2,
+                pre_ext_score: 5,
             },
         ];
 
@@ -3176,6 +3313,7 @@ mod tests {
             score_stitch_sj_shift: 1,
             align_spliced_mate_map_lmin: 0,
             align_spliced_mate_map_lmin_over_lmate: 0.66,
+            out_filter_score_min_over_lread: 0.66,
         };
 
         // Left overhang (prev.length) = 3, below min of 5
@@ -3218,6 +3356,7 @@ mod tests {
             score_stitch_sj_shift: 1,
             align_spliced_mate_map_lmin: 0,
             align_spliced_mate_map_lmin_over_lmate: 0.66,
+            out_filter_score_min_over_lread: 0.66,
         };
 
         // Both overhangs >= 5

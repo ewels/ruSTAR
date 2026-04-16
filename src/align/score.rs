@@ -47,6 +47,8 @@ pub struct AlignmentScorer {
     pub align_spliced_mate_map_lmin: u32,
     /// Min mapped length of spliced mates as fraction of read length (default 0.66)
     pub align_spliced_mate_map_lmin_over_lmate: f64,
+    /// Minimum alignment score relative to read length (outFilterScoreMinOverLread, default 0.66)
+    pub out_filter_score_min_over_lread: f64,
 }
 
 impl AlignmentScorer {
@@ -73,6 +75,7 @@ impl AlignmentScorer {
             score_stitch_sj_shift: 1,
             align_spliced_mate_map_lmin: 0,
             align_spliced_mate_map_lmin_over_lmate: 0.66,
+            out_filter_score_min_over_lread: 0.66,
         }
     }
 
@@ -110,6 +113,7 @@ impl AlignmentScorer {
             score_stitch_sj_shift: params.score_stitch_sj_shift,
             align_spliced_mate_map_lmin: params.align_spliced_mate_map_lmin,
             align_spliced_mate_map_lmin_over_lmate: params.align_spliced_mate_map_lmin_over_lmate,
+            out_filter_score_min_over_lread: params.out_filter_score_min_over_lread,
         }
     }
 
@@ -704,6 +708,7 @@ mod tests {
             score_stitch_sj_shift: 1,
             align_spliced_mate_map_lmin: 0,
             align_spliced_mate_map_lmin_over_lmate: 0.66,
+            out_filter_score_min_over_lread: 0.66,
         };
 
         // Intron from position 2, length 12 (spans positions 2-13 inclusive)
@@ -747,6 +752,7 @@ mod tests {
             score_stitch_sj_shift: 1,
             align_spliced_mate_map_lmin: 0,
             align_spliced_mate_map_lmin_over_lmate: 0.66,
+            out_filter_score_min_over_lread: 0.66,
         };
 
         let motif = scorer.detect_splice_motif(2, 12, &genome);
@@ -789,6 +795,7 @@ mod tests {
             score_stitch_sj_shift: 1,
             align_spliced_mate_map_lmin: 0,
             align_spliced_mate_map_lmin_over_lmate: 0.66,
+            out_filter_score_min_over_lread: 0.66,
         };
 
         let motif = scorer.detect_splice_motif(2, 12, &genome);
@@ -829,6 +836,7 @@ mod tests {
             score_stitch_sj_shift: 1,
             align_spliced_mate_map_lmin: 0,
             align_spliced_mate_map_lmin_over_lmate: 0.66,
+            out_filter_score_min_over_lread: 0.66,
         };
 
         let motif = scorer.detect_splice_motif(2, 12, &genome);
@@ -862,6 +870,7 @@ mod tests {
             score_stitch_sj_shift: 1,
             align_spliced_mate_map_lmin: 0,
             align_spliced_mate_map_lmin_over_lmate: 0.66,
+            out_filter_score_min_over_lread: 0.66,
         };
 
         let (score, gap_type) = scorer.score_gap(0, 5, 0, &genome);
@@ -893,6 +902,7 @@ mod tests {
             score_stitch_sj_shift: 1,
             align_spliced_mate_map_lmin: 0,
             align_spliced_mate_map_lmin_over_lmate: 0.66,
+            out_filter_score_min_over_lread: 0.66,
         };
 
         // Small gap (< align_intron_min) is deletion
@@ -932,6 +942,7 @@ mod tests {
             score_stitch_sj_shift: 1,
             align_spliced_mate_map_lmin: 0,
             align_spliced_mate_map_lmin_over_lmate: 0.66,
+            out_filter_score_min_over_lread: 0.66,
         };
 
         // Gap starting at position 2 (GT), length 26 (>= 21) is splice junction
@@ -969,6 +980,7 @@ mod tests {
             score_stitch_sj_shift: 1,
             align_spliced_mate_map_lmin: 0,
             align_spliced_mate_map_lmin_over_lmate: 0.66,
+            out_filter_score_min_over_lread: 0.66,
         };
 
         // Annotated junction should get bonus
@@ -1010,6 +1022,7 @@ mod tests {
             score_stitch_sj_shift: 1,
             align_spliced_mate_map_lmin: 0,
             align_spliced_mate_map_lmin_over_lmate: 0.66,
+            out_filter_score_min_over_lread: 0.66,
         };
 
         // CT-AC motif: (1,3,0,1) — reverse complement of GT-AG
@@ -1114,6 +1127,7 @@ mod tests {
             score_stitch_sj_shift: 1,
             align_spliced_mate_map_lmin: 0,
             align_spliced_mate_map_lmin_over_lmate: 0.66,
+            out_filter_score_min_over_lread: 0.66,
         };
 
         // Gap of exactly 589824 starting at position 100 should be splice junction
@@ -1192,6 +1206,7 @@ mod tests {
             score_stitch_sj_shift: 1,
             align_spliced_mate_map_lmin: 0,
             align_spliced_mate_map_lmin_over_lmate: 0.66,
+            out_filter_score_min_over_lread: 0.66,
         };
 
         // Gap of 1001 (> 1000 max) should be deletion, not splice junction
@@ -1242,6 +1257,7 @@ mod tests {
             score_stitch_sj_shift: 1,
             align_spliced_mate_map_lmin: 0,
             align_spliced_mate_map_lmin_over_lmate: 0.66,
+            out_filter_score_min_over_lread: 0.66,
         }
     }
 
