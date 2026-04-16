@@ -2614,7 +2614,11 @@ fn stitch_seeds_core(
     // This matches stitch_recurse's `do_left_first = !original_is_reverse`.
     // Mismatch budget for second ext carries over from first ext (STAR: scoreSeedBestMM[iS1]).
     {
-        let zero_ext = ExtendResult { extend_len: 0, max_score: 0, n_mismatch: 0 };
+        let zero_ext = ExtendResult {
+            extend_len: 0,
+            max_score: 0,
+            n_mismatch: 0,
+        };
         let do_left_first = !stitch_is_reverse;
         for wa in &mut wa_entries {
             let right_start = wa.read_pos + wa.length;
