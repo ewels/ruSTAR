@@ -623,35 +623,29 @@ fn extend_softclips(
     // extend the leading/trailing match blocks.
     let mut ext = align.clone();
     ext.n_mismatch = ext.n_mismatch.saturating_add(n_mm_extra);
-    // Extend first exon to absorb left clip.
     if left_clip > 0
         && let Some(first) = ext.exons.first_mut()
     {
-        let actual_left = left_clip.min(first.read_start as u32) as u64;
-        let actual_left = actual_left.min(first.genome_start);
-        first.read_start -= actual_left as usize;
-        first.genome_start -= actual_left;
+        let shift = (left_clip as u64)
+            .min(first.read_start as u64)
+            .min(first.genome_start);
+        first.read_start -= shift as usize;
+        first.genome_start -= shift;
     }
     if right_clip > 0
         && let Some(last) = ext.exons.last_mut()
     {
-        let actual_right = right_clip as u64;
-        last.read_end += actual_right as usize;
-        last.genome_end += actual_right;
+        last.read_end += right_clip as usize;
+        last.genome_end += right_clip as u64;
     }
 
-    // Rebuild CIGAR: drop leading/trailing S; extend the first/last M length.
     ext.cigar = rebuild_cigar_without_softclips(&align.cigar, left_clip, right_clip);
-    ext.genome_start = ext
-        .exons
-        .first()
-        .map(|e| e.genome_start)
-        .unwrap_or(ext.genome_start);
-    ext.genome_end = ext
-        .exons
-        .last()
-        .map(|e| e.genome_end)
-        .unwrap_or(ext.genome_end);
+    if let Some(first) = ext.exons.first() {
+        ext.genome_start = first.genome_start;
+    }
+    if let Some(last) = ext.exons.last() {
+        ext.genome_end = last.genome_end;
+    }
     Some(ext)
 }
 
