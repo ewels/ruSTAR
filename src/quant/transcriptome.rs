@@ -735,7 +735,6 @@ fn is_splice_boundary_before(align: &Transcript, iab: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap as StdHashMap;
 
     fn make_genome() -> Genome {
         Genome {
@@ -756,7 +755,7 @@ mod tests {
         gene_id: &str,
         transcript_id: &str,
     ) -> GtfRecord {
-        let mut attrs: StdHashMap<String, String> = StdHashMap::new();
+        let mut attrs = HashMap::new();
         attrs.insert("gene_id".to_string(), gene_id.to_string());
         attrs.insert("transcript_id".to_string(), transcript_id.to_string());
         GtfRecord {
