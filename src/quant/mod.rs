@@ -4,6 +4,12 @@
 /// of its exons overlap any exon of that gene.  Output: `ReadsPerGene.out.tab`
 /// with four columns — gene_id, unstranded, strand1 (same strand as gene),
 /// strand2 (opposite strand).
+///
+/// Submodules:
+/// - `transcriptome` — transcript-level alignment projection for
+///   `--quantMode TranscriptomeSAM` (Salmon / RSEM input).
+pub mod transcriptome;
+
 use std::io::Write as _;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
