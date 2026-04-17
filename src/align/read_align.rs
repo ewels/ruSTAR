@@ -732,10 +732,14 @@ pub fn align_paired_read(
                 // mate_id=0 = mate1 ([0, len1)), mate_id=1 = mate2 ([len1+1, total_len))
                 match find_mate_boundary(&wt) {
                     Some(boundary_idx) => {
-                        // STAR combined-read score filter (ReadAlign_mappedFilter.cpp line 8):
-                        // trBest->maxScore < outFilterScoreMinOverLread * (Lread-1).
-                        // Apply scoreGenomicLengthLog2scale penalty (stitchWindowAligns.cpp:262-265)
-                        // before comparing to threshold. STAR stores Score=max(0,Score+penalty).
+                        // STAR SCORE-GATE (stitchWindowAligns.cpp:324):
+                        // Score + outFilterMultimapScoreRange >= wTr[0]->maxScore (window best).
+                        // Apply scoreGenomicLengthLog2scale penalty (stitchWindowAligns.cpp:262-265).
+                        // STAR's absolute threshold (outFilterScoreMinOverLread*(Lread-1)) is only
+                        // checked in mappedFilter on the BEST transcript, not per-WT here.
+                        // The window criterion is relative; we use combined_score_threshold as a
+                        // conservative floor (the window best can't be below threshold for the
+                        // read to map), relaxed by outFilterMultimapScoreRange.
                         // Must check BEFORE split_working_transcript because split sets both
                         // wt1.score=wt.score and wt2.score=wt.score (approximations), and using
                         // wt1.score+wt2.score would double-count, inflating the effective score.
@@ -747,7 +751,9 @@ pub fn align_paired_read(
                             .saturating_sub(wt.exons.first().unwrap().genome_start);
                         let length_penalty = scorer.genomic_length_penalty(g_span);
                         let adjusted_score = (wt.score + length_penalty).max(0);
-                        if adjusted_score < combined_score_threshold {
+                        if adjusted_score + params.out_filter_multimap_score_range
+                            < combined_score_threshold
+                        {
                             continue;
                         }
                         let combined_wt_score = adjusted_score;
@@ -951,10 +957,11 @@ pub fn align_paired_read(
                         continue;
                     }
 
-                    // STAR combined-read score filter: check adjusted score before split.
+                    // STAR SCORE-GATE (stitchWindowAligns.cpp:324): relative criterion.
                     // Apply scoreGenomicLengthLog2scale penalty (stitchWindowAligns.cpp:262-265).
                     // split_working_transcript sets wt1.score=wt.score and wt2.score=wt.score,
                     // so using wt1.score+wt2.score would double-count.
+                    // Relax threshold by outFilterMultimapScoreRange (STAR-faithful).
                     let g_span = wt
                         .exons
                         .last()
@@ -963,7 +970,9 @@ pub fn align_paired_read(
                         .saturating_sub(wt.exons.first().unwrap().genome_start);
                     let length_penalty = scorer.genomic_length_penalty(g_span);
                     let adjusted_score = (wt.score + length_penalty).max(0);
-                    if adjusted_score < combined_score_threshold {
+                    if adjusted_score + params.out_filter_multimap_score_range
+                        < combined_score_threshold
+                    {
                         continue;
                     }
                     let combined_wt_score = adjusted_score;
@@ -1362,43 +1371,50 @@ fn calculate_insert_size(mate1_trans: &Transcript, mate2_trans: &Transcript) -> 
 /// STAR's mappedFilter (ReadAlign_mappedFilter.cpp) applies ALL quality checks to the combined
 /// read as a single unit (Lread = len1+1+len2). There are no per-mate quality filters for PE.
 fn filter_paired_transcripts(paired_alns: &mut Vec<PairedAlignment>, params: &Parameters) {
-    paired_alns.retain(|pa| {
-        let t1 = &pa.mate1_transcript;
-        let t2 = &pa.mate2_transcript;
-        let mate1_len = (pa.mate1_region.1 - pa.mate1_region.0) as f64;
-        let mate2_len = (pa.mate2_region.1 - pa.mate2_region.0) as f64;
+    // STAR's mappedFilter (ReadAlign_mappedFilter.cpp) applies ALL quality thresholds to trBest
+    // (the highest-scoring transcript), NOT to each individual transcript. If trBest passes,
+    // all transcripts in the score window are included (they affect NH/MAPQ). If trBest fails,
+    // the read is unmapped.
+    //
+    // Step 1: find the best pair and check quality thresholds on it.
+    let best_pa = paired_alns
+        .iter()
+        .max_by_key(|pa| pa.combined_wt_score);
+    if let Some(best) = best_pa {
+        let mate1_len = (best.mate1_region.1 - best.mate1_region.0) as f64;
+        let mate2_len = (best.mate2_region.1 - best.mate2_region.0) as f64;
         // Lread-1 for the combined read: (len1+1+len2) - 1 = len1 + len2
         let combined_lread_m1 = mate1_len + mate2_len;
 
-        let combined_nm = t1.n_mismatch + t2.n_mismatch;
-
-        // STAR's mappedFilter applies nMatch against Lread-1 on the JOINT combined transcript
-        // (ReadAlign_mappedFilter.cpp line 21). For overlapping pairs (both mates at same genome
-        // region), STAR's joint transcript covers only one mate's worth → nMatch ≈ 137 < 198.
-        // ruSTAR extends each mate independently after split, inflating per-mate n_matched().
-        //
-        // Fix: use the pre-split combined-read coverage captured before split_working_transcript,
-        // which directly mirrors STAR's joint transcript nMatch without extension inflation.
-        let combined_match = pa.combined_n_match;
+        let combined_nm = best.mate1_transcript.n_mismatch + best.mate2_transcript.n_mismatch;
 
         // Score: trBest->maxScore < outFilterScoreMin || < outFilterScoreMinOverLread*(Lread-1)
         // STAR checks the combined WT score (ReadAlign_mappedFilter.cpp), not the sum of per-mate
         // finalized scores. Using t1.score + t2.score incorrectly double-applies the genomic
         // length penalty (once per mate), rejecting valid overlapping short-insert pairs where
         // per-mate spans are small (penalty ≈ −2 each → sum penalty −4 vs combined penalty −2).
-        // combined_wt_score was already verified ≥ combined_score_threshold before the split.
-        let combined_score = pa.combined_wt_score;
+        let combined_score = best.combined_wt_score;
         if combined_score < params.out_filter_score_min
-            || combined_score < (params.out_filter_score_min_over_lread * combined_lread_m1) as i32
+            || combined_score
+                < (params.out_filter_score_min_over_lread * combined_lread_m1) as i32
         {
-            return false;
+            paired_alns.clear();
+            return;
         }
 
         // Match bases: trBest->nMatch < outFilterMatchNmin || < outFilterMatchNminOverLread*(Lread-1)
+        // STAR's mappedFilter applies nMatch against Lread-1 on the JOINT combined transcript.
+        // For overlapping pairs (both mates at same genome region), STAR's joint transcript covers
+        // only one mate's worth → nMatch ≈ 137 < 198.
+        // Fix: use the pre-split combined-read coverage captured before split_working_transcript,
+        // which directly mirrors STAR's joint transcript nMatch without extension inflation.
+        let combined_match = best.combined_n_match;
         if combined_match < params.out_filter_match_nmin
-            || combined_match < (params.out_filter_match_nmin_over_lread * combined_lread_m1) as u32
+            || combined_match
+                < (params.out_filter_match_nmin_over_lread * combined_lread_m1) as u32
         {
-            return false;
+            paired_alns.clear();
+            return;
         }
 
         // Mismatches: nMM > outFilterMismatchNmaxTotal || nMM/rLength > outFilterMismatchNoverLmax
@@ -1407,13 +1423,12 @@ fn filter_paired_transcripts(paired_alns: &mut Vec<PairedAlignment>, params: &Pa
             || (combined_nm as f64)
                 > params.out_filter_mismatch_nover_lmax * (mate1_len + mate2_len)
         {
-            return false;
+            paired_alns.clear();
+            return;
         }
+    }
 
-        true
-    });
-
-    // STAR's mappedFilter: if nTr > outFilterMultimapNmax → unmapped=multi (clear all).
+    // Step 2: STAR's mappedFilter: if nTr > outFilterMultimapNmax → unmapped=multi (clear all).
     // Unlike SE which truncates for output, PE must REJECT the entire pair when over the limit.
     if paired_alns.len() > params.out_filter_multimap_nmax as usize {
         paired_alns.clear();

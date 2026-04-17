@@ -2,7 +2,7 @@
 
 # Phase 17: Features + Polish
 
-**Status**: In Progress (17.1, 17.5 complete)
+**Status**: In Progress (17.1, 17.5, 17.A, 17.C complete)
 
 **Goal**: Production-ready features and quality-of-life improvements.
 
@@ -11,6 +11,9 @@
 | Sub-phase | Description | Status |
 |-----------|-------------|--------|
 | 17.1 | Log.final.out statistics file (MultiQC/RNA-SeQC) | ✅ Complete |
+| 17.A | `scoreSeedBest` pre-extension on WA entries (STAR faithful) | ✅ Complete |
+| 17.B | Per-mate seeding (fix `.18919121`, `.6302610` arch failures) | Blocked — per-mate clustering approach caused regressions; root cause under investigation |
+| 17.C | STAR-faithful SCORE-GATE + mappedFilter for PE (fix 4 MAPQ inflations) | ✅ Complete |
 | 17.2 | Coordinate-sorted BAM (`--outSAMtype BAM SortedByCoordinate`) | Planned |
 | 17.3 | Paired-end chimeric detection | Planned |
 | 17.4 | `--outReadsUnmapped Fastx` | Planned |
@@ -76,6 +79,84 @@
 **Result**: 0 clippy warnings, 264/264 tests passing.
 
 ---
+
+---
+
+## Phase 17.A: scoreSeedBest Pre-Extension ✅ (2026-04-16)
+
+**Goal**: Match STAR's `ReadAlign_stitchWindowSeeds.cpp` — pre-extend each seed left+right before the recursive DP and store the result as `pre_ext_score` on each `WindowAlignment` entry.
+
+**What STAR does**: Before `stitchWindowAligns`, STAR computes `scoreSeedBest[iS]` for every seed in the window via a two-level DP: (1) base case: `length + left_ext`, (2) chain case: `stitchAlignToTranscript(iS2→iS1) + scoreSeedBest[iS2]`. Then adds `right_ext` universally. Used for seed ordering in the recursive aligner (start from highest-scoring seed).
+
+**Implementation**:
+
+1. **`src/align/stitch.rs`** — `WindowAlignment` struct: added `pub pre_ext_score: i32` field. All construction sites updated (`pre_ext_score: length as i32` default).
+
+2. **`src/align/score.rs`** — `AlignmentScorer`: added `pub out_filter_score_min_over_lread: f64`. All constructor paths updated.
+
+3. **`src/chimeric/detect.rs`** — `WindowAlignment` construction updated.
+
+4. **`src/align/stitch.rs`** — `stitch_seeds_core`: inserted pre-extension block after seed dedup/sort, before `stitch_recurse`:
+   - EXTEND_ORDER respected: left-first for forward clusters (`!stitch_is_reverse`), right-first for reverse clusters (matching `stitch_recurse` base case)
+   - `right_len_prev = wa.length + first_ext.extend_len` (mirrors base case's `len_after_first`)
+   - Chain DP: `dp[i] = max(dp[i], dp[j] + wa_entries[i].pre_ext_score)` with colinearity check
+   - No hard pre-filter gate: STAR uses `scoreSeedBest` for ordering only, not window rejection
+
+**Key finding during implementation**: A pre-filter gate at full `outFilterScoreMinOverLread * (Lread-1)` threshold caused 42 false rejections — reads with only short seeds (9-16bp) in low-quality windows, where the full WT extension (starting from leftmost seed) can reach the threshold even though no individual seed's pre-extension does. STAR does NOT apply this gate; `scoreSeedBest` is used for seed ordering in `stitchWindowAligns` only.
+
+**Result**: 268/268 tests, 0 warnings, 8796/8926 SE (baseline maintained), 8390/8390 PE (baseline maintained). `pre_ext_score` ready for Phase 17.B seed ordering.
+
+---
+
+## Phase 17.B: Per-Mate Seeding — Blocked (architectural)
+
+**What this fixes**: `.18919121` (STAR-only) and `.6302610` (ruSTAR-only FP) — both caused by adapter-contaminated seeds in the combined read crossing mate boundaries.
+
+**Implementation attempted (2026-04-16)**: Seeded mate1 and RC(mate2) separately, clustered each mate independently, then paired compatible (same-chr, same-strand, within-gap) clusters. This correctly prevents cross-mate adapter seed contamination.
+
+**Outcome**: The per-mate clustering approach introduced 10 new ruSTAR-only FPs and 2 new STAR-only cases (net regression of +8 FPs), while NOT fixing the original 2 FPs. Reverted to Phase 17.A state.
+
+**Root cause of regressions**: In unified clustering, a mate2 anchor creates windows that mate1 non-anchor seeds join (and vice versa). Per-mate clustering breaks this inter-mate window sharing that legitimate reads depend on (e.g. short-insert pairs where one mate has a strong anchor and the other has only weak seeds). The single-mate fallback clusters added to the pairing output also caused spurious pairings.
+
+**What STAR actually does**: STAR's `winBin` is `winBin[strand][bin]` — a 2D array indexed by strand (0=fwd, 1=rev) and genomic bin, allocated as `winBin[2][genome_size/65536]`. This is **strand-aware and identical in semantics to ruSTAR's `HashMap<(bool, u64), usize>`**. The earlier theory that STAR uses a bin-only key was incorrect (verified against STAR source in `ReadAlign_assignAlignToWindow.cpp` line 9: `uint iW=winBin[aStr][a1>>P.winBinNbits]`).
+
+**Status**: Blocked — per-mate clustering caused regressions; actual root cause of `.6302610` and `.18919121` (post Phase 17.A) still needs fresh debugging to confirm. The 2 FPs and 2 STAR-only cases remain as known limitations.
+
+---
+
+## Phase 17.C: STAR-faithful SCORE-GATE + mappedFilter ✅ (2026-04-17)
+
+**Problem**: 4 PE MAPQ inflations for rDNA/repeat multi-mappers. ruSTAR NH=2 vs STAR NH=3 for reads with cross-rDNA-copy pairs (M1@copy1 + M2@copy2, 9037bp gap), causing MAPQ=3 vs STAR's MAPQ=1.
+
+**Root cause**: Two distinct bugs:
+
+1. **Per-WT absolute threshold too strict** (`read_align.rs` forward/reverse cluster processing):
+   - ruSTAR used `if adjusted_score < combined_score_threshold { continue; }` (hard cutoff at `outFilterScoreMinOverLread * (Lread-1)`)
+   - STAR's `stitchWindowAligns.cpp:324` SCORE-GATE uses a RELATIVE criterion: `Score + outFilterMultimapScoreRange >= wTr[0]->maxScore` (within `scoreRange=1` of window best)
+   - For cross-copy pairs: same-copy score=198 (g_span=100bp, penalty=-2), cross-copy score=197 (g_span=9237bp, penalty=-3). ruSTAR rejected cross-copy (197 < 198); STAR accepted it (197+1 ≥ 198)
+
+2. **filter_paired_transcripts applied absolute threshold per-pair** (not just to best):
+   - ruSTAR checked every pair's `combined_wt_score < absolute_threshold` → removed cross-copy (197 < 198)
+   - STAR's `ReadAlign_mappedFilter.cpp` checks only `trBest->maxScore >= threshold` — if the best passes, ALL pairs in the score window are kept
+
+**Fix**:
+
+1. **`src/align/read_align.rs`** — both forward and reverse cluster processing (lines 750, 972):
+   ```rust
+   // Old:
+   if adjusted_score < combined_score_threshold { continue; }
+   // New:
+   if adjusted_score + params.out_filter_multimap_score_range < combined_score_threshold { continue; }
+   ```
+
+2. **`src/align/read_align.rs`** — `filter_paired_transcripts` (line 1373):
+   - Changed from per-pair retain to best-pair quality check
+   - Find best pair (max `combined_wt_score`); if best fails any threshold → clear all (read unmapped)
+   - If best passes → keep all pairs (they already passed multMapSelect relative criterion)
+
+**Verification**: STAR debug trace on `.19790508` confirmed Score=197 cross-copy pair is INSERTED (`TR-INSERTED`) with `global_pass=1` because `scoreRange=1` (`outFilterMultimapScoreRange`). STAR's `mappedFilter` only checks `trBest->maxScore=198 >= 198` — passes.
+
+**Result**: 268/268 tests, 0 warnings, 8796/8926 SE (maintained), 8390/8390 PE (maintained), **0 MAPQ inflations** (was 4), **0 MAPQ deflations**, faithfulness 98.915% (was 98.903%).
 
 ---
 

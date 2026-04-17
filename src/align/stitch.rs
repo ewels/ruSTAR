@@ -992,7 +992,10 @@ fn stitch_align_to_transcript(
             let first_exon = &wt.exons[0];
             let ex_g = first_exon.genome_start;
             let ex_r = first_exon.read_start as u64;
-            // Reject when gBstart + EX_R < EX_G (and EX_G >= EX_R to avoid false rejection near chr start)
+            // STAR stitchAlignToTranscript.cpp line 352:
+            // accept if gBstart + EX_R + alignEndsProtrude.nBasesMax >= EX_G || EX_G < EX_R
+            // With default alignEndsProtrude.nBasesMax=0 this simplifies to:
+            // reject if EX_G >= EX_R && gBstart + EX_R < EX_G
             let fwd_reject = ex_g >= ex_r && wa.genome_pos + ex_r < ex_g;
             if fwd_reject {
                 return None;
