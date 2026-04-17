@@ -17,7 +17,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 /// via rayon, so we instead fold the read name into the seed — this keeps tie
 /// breaks reproducible regardless of thread count while still honoring the
 /// user's `--runRNGseed` value.
-fn per_read_seed(run_rng_seed: u64, read_name: &str) -> u64 {
+pub(crate) fn per_read_seed(run_rng_seed: u64, read_name: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
     read_name.hash(&mut hasher);
     run_rng_seed.wrapping_mul(hasher.finish().wrapping_add(1))

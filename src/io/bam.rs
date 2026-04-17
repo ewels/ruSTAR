@@ -2,6 +2,7 @@
 use crate::error::Error;
 use crate::genome::Genome;
 use crate::params::Parameters;
+use crate::quant::transcriptome::TranscriptomeIndex;
 use noodles::bam;
 use noodles::sam;
 use noodles::sam::alignment::io::Write as SamWrite;
@@ -59,6 +60,37 @@ impl BamWriter {
         writer.write_header(&header)?;
 
         Ok(Self { writer, header })
+    }
+
+    /// Create a BAM writer whose @SQ header lists the transcripts (not
+    /// chromosomes) from `tr_idx`.  Used for
+    /// `Aligned.toTranscriptome.out.bam`.
+    pub fn create_transcriptome(
+        output_path: &Path,
+        tr_idx: &TranscriptomeIndex,
+        params: &Parameters,
+    ) -> Result<Self, Error> {
+        let file = File::create(output_path)?;
+        let buf_writer = BufWriter::new(file);
+
+        // Build one @SQ per transcript (name = transcript_id, length = t-space length).
+        let refs = tr_idx
+            .tr_ids
+            .iter()
+            .zip(tr_idx.tr_length.iter())
+            .map(|(id, len)| (id.as_str(), *len as usize));
+        let header = crate::io::sam::build_sam_header_from_refs(refs, params)?;
+
+        let mut writer = bam::io::Writer::new(buf_writer);
+        writer.write_header(&header)?;
+
+        Ok(Self { writer, header })
+    }
+
+    /// Access the underlying SAM header (needed by serial-write code paths
+    /// that build records outside of `write_batch`).
+    pub fn header(&self) -> &sam::Header {
+        &self.header
     }
 
     /// Write batch of buffered records (for parallel processing)
@@ -189,6 +221,41 @@ mod tests {
 
         let result = writer.finish();
         assert!(result.is_ok(), "Finishing BAM file should succeed");
+    }
+
+    #[test]
+    fn test_bam_transcriptome_writer_creation() {
+        use crate::junction::gtf::GtfRecord;
+        use crate::quant::transcriptome::TranscriptomeIndex;
+        use std::collections::HashMap;
+
+        let genome = create_test_genome();
+        // Stretch genome / exon to fit the tiny test chromosome.
+        let mut attrs = HashMap::new();
+        attrs.insert("gene_id".to_string(), "G1".to_string());
+        attrs.insert("transcript_id".to_string(), "T1".to_string());
+        let exons = vec![GtfRecord {
+            seqname: "chr1".to_string(),
+            feature: "exon".to_string(),
+            start: 1,
+            end: 8,
+            strand: '+',
+            attributes: attrs,
+        }];
+        let tr_idx = TranscriptomeIndex::from_gtf_exons(&exons, &genome).unwrap();
+        assert_eq!(tr_idx.n_transcripts(), 1);
+
+        let params = create_test_params();
+        let temp_file = NamedTempFile::new().unwrap();
+        let writer = BamWriter::create_transcriptome(temp_file.path(), &tr_idx, &params);
+        assert!(
+            writer.is_ok(),
+            "transcriptome BAM writer creation should succeed"
+        );
+
+        // Header should contain exactly 1 @SQ entry (matching n_transcripts).
+        let writer = writer.unwrap();
+        assert_eq!(writer.header().reference_sequences().len(), 1);
     }
 
     #[test]
