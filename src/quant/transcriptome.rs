@@ -34,20 +34,15 @@ use crate::params::Parameters;
 ///     indels and soft-clips as-is.
 ///   * `BanSingleEndExtendSoftclip` — reject single-mate-only PE alignments;
 ///     keep indels; extend soft-clips.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum QuantTranscriptomeSAMoutput {
     /// Default: ban indels, ban single-mate PE hits, extend soft-clips.
+    #[default]
     BanSingleEndBanIndelsExtendSoftclip,
     /// Ban single-mate PE hits only; keep indels and soft-clips.
     BanSingleEnd,
     /// Ban single-mate PE hits; keep indels; extend soft-clips.
     BanSingleEndExtendSoftclip,
-}
-
-impl Default for QuantTranscriptomeSAMoutput {
-    fn default() -> Self {
-        Self::BanSingleEndBanIndelsExtendSoftclip
-    }
 }
 
 impl std::str::FromStr for QuantTranscriptomeSAMoutput {
@@ -254,11 +249,7 @@ impl TranscriptomeIndex {
                 _ => 1u8, // unknown → treat as forward (STAR default)
             };
 
-            let gene_id = first
-                .attributes
-                .get("gene_id")
-                .cloned()
-                .unwrap_or_default();
+            let gene_id = first.attributes.get("gene_id").cloned().unwrap_or_default();
 
             tr_ids.push(tid.clone());
             tr_chr_idx.push(chr_idx);
@@ -343,9 +334,7 @@ pub fn align_to_transcripts(
 
     // Binary-search `tr_starts_sorted` for greatest tr_start <= a_start.
     // partition_point returns the first index with tr_start > a_start; subtract 1.
-    let upper = idx
-        .tr_starts_sorted
-        .partition_point(|&s| s <= a_start);
+    let upper = idx.tr_starts_sorted.partition_point(|&s| s <= a_start);
     if upper == 0 {
         return out; // a_start is to the left of all transcripts
     }
@@ -393,10 +382,7 @@ fn align_to_one_transcript(
     let first_block = &align.exons[0];
     let g1 = first_block.genome_start;
 
-    let mut ex = match find_containing_exon(tr_exons, g1) {
-        Some(idx) => idx,
-        None => return None,
-    };
+    let mut ex = find_containing_exon(tr_exons, g1)?;
 
     // Build projected exons (in t-space) as we walk the alignment blocks.
     let mut proj_exons: Vec<Exon> = Vec::new();
@@ -435,7 +421,7 @@ fn align_to_one_transcript(
             // Coalesce: extend the last projected exon by this block's length
             // (STAR adds block EX_L directly — does NOT update start position).
             if let Some(last) = proj_exons.last_mut() {
-                let len = (block_end - block_start) as u64;
+                let len = block_end - block_start;
                 last.genome_end += len;
                 last.read_end = block.read_end;
             } else {
@@ -646,9 +632,8 @@ fn extend_softclips(
 
     // Apply STAR's mismatch budget.
     let mismatch_nmax_abs = params.out_filter_mismatch_nmax;
-    let mismatch_nmax_rel = ((params.out_filter_mismatch_nover_lmax
-        * (lread.saturating_sub(1) as f64))
-        .floor()) as u32;
+    let mismatch_nmax_rel =
+        ((params.out_filter_mismatch_nover_lmax * (lread.saturating_sub(1) as f64)).floor()) as u32;
     let budget = mismatch_nmax_abs.min(mismatch_nmax_rel);
     if align.n_mismatch.saturating_add(n_mm_extra) > budget {
         return None;
@@ -677,8 +662,16 @@ fn extend_softclips(
 
     // Rebuild CIGAR: drop leading/trailing S; extend the first/last M length.
     ext.cigar = rebuild_cigar_without_softclips(&align.cigar, left_clip, right_clip);
-    ext.genome_start = ext.exons.first().map(|e| e.genome_start).unwrap_or(ext.genome_start);
-    ext.genome_end = ext.exons.last().map(|e| e.genome_end).unwrap_or(ext.genome_end);
+    ext.genome_start = ext
+        .exons
+        .first()
+        .map(|e| e.genome_start)
+        .unwrap_or(ext.genome_start);
+    ext.genome_end = ext
+        .exons
+        .last()
+        .map(|e| e.genome_end)
+        .unwrap_or(ext.genome_end);
     Some(ext)
 }
 
@@ -693,15 +686,10 @@ fn rebuild_cigar_without_softclips(
     let mut out: Vec<CigarOp> = Vec::with_capacity(cigar.len());
     let mut start_idx = 0;
     let mut end_idx = cigar.len();
-    if left_clip > 0
-        && matches!(cigar.first(), Some(CigarOp::SoftClip(_)))
-    {
+    if left_clip > 0 && matches!(cigar.first(), Some(CigarOp::SoftClip(_))) {
         start_idx = 1;
     }
-    if right_clip > 0
-        && end_idx > start_idx
-        && matches!(cigar[end_idx - 1], CigarOp::SoftClip(_))
-    {
+    if right_clip > 0 && end_idx > start_idx && matches!(cigar[end_idx - 1], CigarOp::SoftClip(_)) {
         end_idx -= 1;
     }
 
@@ -849,9 +837,9 @@ mod tests {
     fn multi_exon_transcript_ex_len_cum() {
         let genome = make_genome();
         let exons = vec![
-            make_exon("chr1", 101, 200, '+', "G1", "T1"),   // len 100
-            make_exon("chr1", 301, 400, '+', "G1", "T1"),   // len 100
-            make_exon("chr1", 501, 650, '+', "G1", "T1"),   // len 150
+            make_exon("chr1", 101, 200, '+', "G1", "T1"), // len 100
+            make_exon("chr1", 301, 400, '+', "G1", "T1"), // len 100
+            make_exon("chr1", 501, 650, '+', "G1", "T1"), // len 150
         ];
         let idx = TranscriptomeIndex::from_gtf_exons(&exons, &genome).unwrap();
         assert_eq!(idx.n_transcripts(), 1);
@@ -964,12 +952,7 @@ mod tests {
         let idx = TranscriptomeIndex::from_gtf_exons(&gtf, &genome).unwrap();
 
         // Align fully inside exon: genome [110, 150), read [0, 40).
-        let align = make_align(
-            0,
-            false,
-            vec![(110, 150, 0, 40)],
-            vec![CigarOp::Match(40)],
-        );
+        let align = make_align(0, false, vec![(110, 150, 0, 40)], vec![CigarOp::Match(40)]);
         let results = align_to_transcripts(&align, &idx, 40);
         assert_eq!(results.len(), 1);
         let r = &results[0];
@@ -1002,7 +985,11 @@ mod tests {
             0,
             false,
             vec![(150, 200, 0, 50), (300, 350, 50, 100)],
-            vec![CigarOp::Match(50), CigarOp::RefSkip(100), CigarOp::Match(50)],
+            vec![
+                CigarOp::Match(50),
+                CigarOp::RefSkip(100),
+                CigarOp::Match(50),
+            ],
         );
         let results = align_to_transcripts(&align, &idx, 100);
         assert_eq!(results.len(), 1);
@@ -1034,7 +1021,11 @@ mod tests {
             0,
             false,
             vec![(150, 195, 0, 45), (305, 350, 45, 90)],
-            vec![CigarOp::Match(45), CigarOp::RefSkip(110), CigarOp::Match(45)],
+            vec![
+                CigarOp::Match(45),
+                CigarOp::RefSkip(110),
+                CigarOp::Match(45),
+            ],
         );
         let results = align_to_transcripts(&align, &idx, 90);
         assert_eq!(results.len(), 0);
@@ -1048,12 +1039,7 @@ mod tests {
         let idx = TranscriptomeIndex::from_gtf_exons(&gtf, &genome).unwrap();
 
         // Align forward on genome [120, 160), read [0, 40).
-        let align = make_align(
-            0,
-            false,
-            vec![(120, 160, 0, 40)],
-            vec![CigarOp::Match(40)],
-        );
+        let align = make_align(0, false, vec![(120, 160, 0, 40)], vec![CigarOp::Match(40)]);
         let results = align_to_transcripts(&align, &idx, 40);
         assert_eq!(results.len(), 1);
         let r = &results[0];
@@ -1085,7 +1071,11 @@ mod tests {
             0,
             false,
             vec![(350, 400, 0, 50), (500, 550, 50, 100)],
-            vec![CigarOp::Match(50), CigarOp::RefSkip(100), CigarOp::Match(50)],
+            vec![
+                CigarOp::Match(50),
+                CigarOp::RefSkip(100),
+                CigarOp::Match(50),
+            ],
         );
         let results = align_to_transcripts(&align, &idx, 100);
         assert_eq!(results.len(), 1);
@@ -1122,12 +1112,7 @@ mod tests {
         let gtf = vec![make_exon("chr1", 501, 600, '+', "G1", "T1")];
         let idx = TranscriptomeIndex::from_gtf_exons(&gtf, &genome).unwrap();
 
-        let align = make_align(
-            0,
-            false,
-            vec![(100, 150, 0, 50)],
-            vec![CigarOp::Match(50)],
-        );
+        let align = make_align(0, false, vec![(100, 150, 0, 50)], vec![CigarOp::Match(50)]);
         let results = align_to_transcripts(&align, &idx, 50);
         assert_eq!(results.len(), 0);
     }
@@ -1144,12 +1129,7 @@ mod tests {
         ];
         let idx = TranscriptomeIndex::from_gtf_exons(&gtf, &genome).unwrap();
 
-        let align = make_align(
-            0,
-            false,
-            vec![(200, 250, 0, 50)],
-            vec![CigarOp::Match(50)],
-        );
+        let align = make_align(0, false, vec![(200, 250, 0, 50)], vec![CigarOp::Match(50)]);
         let results = align_to_transcripts(&align, &idx, 50);
         assert_eq!(results.len(), 2);
     }
@@ -1165,8 +1145,7 @@ mod tests {
     fn mode_from_str_all_three() {
         use std::str::FromStr;
         assert_eq!(
-            QuantTranscriptomeSAMoutput::from_str("BanSingleEnd_BanIndels_ExtendSoftclip")
-                .unwrap(),
+            QuantTranscriptomeSAMoutput::from_str("BanSingleEnd_BanIndels_ExtendSoftclip").unwrap(),
             QuantTranscriptomeSAMoutput::BanSingleEndBanIndelsExtendSoftclip,
         );
         assert_eq!(
@@ -1182,9 +1161,7 @@ mod tests {
 
     #[test]
     fn mode_flags() {
-        assert!(
-            !QuantTranscriptomeSAMoutput::BanSingleEndBanIndelsExtendSoftclip.allow_indels()
-        );
+        assert!(!QuantTranscriptomeSAMoutput::BanSingleEndBanIndelsExtendSoftclip.allow_indels());
         assert!(!QuantTranscriptomeSAMoutput::BanSingleEndBanIndelsExtendSoftclip.allow_softclip());
         assert!(QuantTranscriptomeSAMoutput::BanSingleEnd.allow_indels());
         assert!(QuantTranscriptomeSAMoutput::BanSingleEnd.allow_softclip());
@@ -1197,12 +1174,7 @@ mod tests {
         let genome = make_genome();
         let gtf = vec![make_exon("chr1", 101, 300, '+', "G1", "T1")];
         let idx = TranscriptomeIndex::from_gtf_exons(&gtf, &genome).unwrap();
-        let mut align = make_align(
-            0,
-            false,
-            vec![(110, 150, 0, 40)],
-            vec![CigarOp::Match(40)],
-        );
+        let mut align = make_align(0, false, vec![(110, 150, 0, 40)], vec![CigarOp::Match(40)]);
         align.n_gap = 1; // simulate insertion/deletion
         let params = default_params();
         let read = vec![0u8; 40];
@@ -1223,12 +1195,7 @@ mod tests {
         let genome = make_genome();
         let gtf = vec![make_exon("chr1", 101, 300, '+', "G1", "T1")];
         let idx = TranscriptomeIndex::from_gtf_exons(&gtf, &genome).unwrap();
-        let mut align = make_align(
-            0,
-            false,
-            vec![(110, 150, 0, 40)],
-            vec![CigarOp::Match(40)],
-        );
+        let mut align = make_align(0, false, vec![(110, 150, 0, 40)], vec![CigarOp::Match(40)]);
         align.n_gap = 1;
         let params = default_params();
         let read = vec![0u8; 40];

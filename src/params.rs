@@ -1043,12 +1043,7 @@ mod tests {
 
     #[test]
     fn quant_transcriptome_sam_enabled() {
-        let p = parse(&[
-            "--readFilesIn",
-            "r.fq",
-            "--quantMode",
-            "TranscriptomeSAM",
-        ]);
+        let p = parse(&["--readFilesIn", "r.fq", "--quantMode", "TranscriptomeSAM"]);
         assert!(p.quant_transcriptome_sam());
         assert!(!p.quant_gene_counts());
     }
@@ -1081,12 +1076,7 @@ mod tests {
 
     #[test]
     fn validate_transcriptome_sam_needs_gtf() {
-        let p = parse(&[
-            "--readFilesIn",
-            "r.fq",
-            "--quantMode",
-            "TranscriptomeSAM",
-        ]);
+        let p = parse(&["--readFilesIn", "r.fq", "--quantMode", "TranscriptomeSAM"]);
         let err = p.validate().unwrap_err();
         assert!(err.to_string().contains("TranscriptomeSAM"));
         assert!(err.to_string().contains("sjdbGTFfile"));
