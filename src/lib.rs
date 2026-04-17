@@ -781,7 +781,6 @@ fn align_reads_paired_end<W: AlignmentWriter>(
     let max_multimaps = params.out_filter_multimap_nmax as usize;
     let output_unmapped = params.out_sam_unmapped != params::OutSamUnmapped::None;
     let by_sjout = params.out_filter_type == OutFilterType::BySJout;
-    let _ = params.rg_ids()?; // Validate early; per-call uses params inside builders.
 
     // Buffer for BySJout mode
     let mut bysj_buffer: Vec<AlignmentBatchResults> = Vec::new();

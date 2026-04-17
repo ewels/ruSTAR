@@ -122,7 +122,7 @@ impl SamWriter {
                 hit_index + 1, // 1-based
                 &attrs,
             )?;
-            maybe_insert_rg_tag(&mut record, &attrs, rg_id);
+            maybe_insert_rg_tag(&mut record, rg_id);
 
             self.writer.write_alignment_record(&self.header, &record)?;
         }
@@ -214,11 +214,7 @@ impl SamWriter {
         // Quality scores
         *record.quality_scores_mut() = QualityScores::from(read_qual.to_vec());
 
-        if let Some(id) = rg_id {
-            record
-                .data_mut()
-                .insert(Tag::READ_GROUP, Value::String(BString::from(id)));
-        }
+        maybe_insert_rg_tag(&mut record, rg_id);
 
         Ok(record)
     }
@@ -273,7 +269,7 @@ impl SamWriter {
                 hit_index + 1, // 1-based
                 &attrs,
             )?;
-            maybe_insert_rg_tag(&mut record, &attrs, rg_id);
+            maybe_insert_rg_tag(&mut record, rg_id);
             records.push(record);
         }
 
@@ -352,7 +348,7 @@ impl SamWriter {
                 combined_score,
                 &attrs,
             )?;
-            maybe_insert_rg_tag(&mut rec1, &attrs, rg_id);
+            maybe_insert_rg_tag(&mut rec1, rg_id);
             records.push(rec1);
 
             // Create record for mate2 (this=mate2, mate=mate1)
@@ -372,7 +368,7 @@ impl SamWriter {
                 combined_score,
                 &attrs,
             )?;
-            maybe_insert_rg_tag(&mut rec2, &attrs, rg_id);
+            maybe_insert_rg_tag(&mut rec2, rg_id);
             records.push(rec2);
         }
 
@@ -514,7 +510,7 @@ impl SamWriter {
             );
             data.insert(Tag::new(b'M', b'D'), Value::String(BString::from(md)));
         }
-        maybe_insert_rg_tag(&mut mapped_rec, &attrs, rg_id);
+        maybe_insert_rg_tag(&mut mapped_rec, rg_id);
 
         // --- Build unmapped mate record ---
         let mut unmapped_rec = RecordBuf::default();
@@ -554,7 +550,7 @@ impl SamWriter {
         let unmapped_seq_bytes: Vec<u8> = unmapped_seq.iter().map(|&b| decode_base(b)).collect();
         *unmapped_rec.sequence_mut() = Sequence::from(unmapped_seq_bytes);
         *unmapped_rec.quality_scores_mut() = QualityScores::from(unmapped_qual.to_vec());
-        maybe_insert_rg_tag(&mut unmapped_rec, &attrs, rg_id);
+        maybe_insert_rg_tag(&mut unmapped_rec, rg_id);
 
         // Order: mate1 first, mate2 second
         if mate1_is_mapped {
@@ -578,7 +574,6 @@ impl SamWriter {
         params: &Parameters,
     ) -> Result<Vec<RecordBuf>, Error> {
         let mut records = Vec::with_capacity(2);
-        let attrs = params.sam_attribute_set();
         let rg_ids = params.rg_ids()?;
         let rg_id = rg_ids.first().map(String::as_str);
 
@@ -596,7 +591,7 @@ impl SamWriter {
         let seq1_bytes: Vec<u8> = mate1_seq.iter().map(|&b| decode_base(b)).collect();
         *rec1.sequence_mut() = Sequence::from(seq1_bytes);
         *rec1.quality_scores_mut() = QualityScores::from(mate1_qual.to_vec());
-        maybe_insert_rg_tag(&mut rec1, &attrs, rg_id);
+        maybe_insert_rg_tag(&mut rec1, rg_id);
         records.push(rec1);
 
         // Mate2 record
@@ -613,7 +608,7 @@ impl SamWriter {
         let seq2_bytes: Vec<u8> = mate2_seq.iter().map(|&b| decode_base(b)).collect();
         *rec2.sequence_mut() = Sequence::from(seq2_bytes);
         *rec2.quality_scores_mut() = QualityScores::from(mate2_qual.to_vec());
-        maybe_insert_rg_tag(&mut rec2, &attrs, rg_id);
+        maybe_insert_rg_tag(&mut rec2, rg_id);
         records.push(rec2);
 
         Ok(records)
@@ -678,9 +673,11 @@ pub fn build_sam_header(genome: &Genome, params: &Parameters) -> Result<sam::Hea
     Ok(builder.build())
 }
 
-/// Insert `RG:Z:<id>` on the record when RG is in `attrs` and an ID is set.
-fn maybe_insert_rg_tag(record: &mut RecordBuf, attrs: &HashSet<String>, rg_id: Option<&str>) {
-    if let (true, Some(id)) = (attrs.contains("RG"), rg_id) {
+/// Insert `RG:Z:<id>` on the record when an ID is set. `sam_attribute_set()`
+/// auto-adds `RG` to the attribute set whenever an RG line is configured, so
+/// `rg_id.is_some()` implies the attribute is wanted — no extra gate needed.
+fn maybe_insert_rg_tag(record: &mut RecordBuf, rg_id: Option<&str>) {
+    if let Some(id) = rg_id {
         record
             .data_mut()
             .insert(Tag::READ_GROUP, Value::String(BString::from(id)));
