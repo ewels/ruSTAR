@@ -107,8 +107,8 @@ impl SamWriter {
         if params.out_sam_strand_field != "intronMotif" {
             attrs.remove("XS");
         }
-        let rg_ids = params.rg_ids()?;
-        let rg_id = rg_ids.first().map(String::as_str);
+        let rg_id_owned = params.primary_rg_id()?;
+        let rg_id = rg_id_owned.as_deref();
 
         for (hit_index, transcript) in transcripts.iter().take(max_output).enumerate() {
             let mut record = transcript_to_record(
@@ -253,8 +253,8 @@ impl SamWriter {
         if params.out_sam_strand_field != "intronMotif" {
             attrs.remove("XS");
         }
-        let rg_ids = params.rg_ids()?;
-        let rg_id = rg_ids.first().map(String::as_str);
+        let rg_id_owned = params.primary_rg_id()?;
+        let rg_id = rg_id_owned.as_deref();
 
         let mut records = Vec::with_capacity(max_output);
         for (hit_index, transcript) in transcripts.iter().take(max_output).enumerate() {
@@ -320,8 +320,8 @@ impl SamWriter {
         if params.out_sam_strand_field != "intronMotif" {
             attrs.remove("XS");
         }
-        let rg_ids = params.rg_ids()?;
-        let rg_id = rg_ids.first().map(String::as_str);
+        let rg_id_owned = params.primary_rg_id()?;
+        let rg_id = rg_id_owned.as_deref();
 
         let mut records = Vec::with_capacity(max_output * 2);
 
@@ -406,8 +406,8 @@ impl SamWriter {
         if params.out_sam_strand_field != "intronMotif" {
             attrs.remove("XS");
         }
-        let rg_ids = params.rg_ids()?;
-        let rg_id = rg_ids.first().map(String::as_str);
+        let rg_id_owned = params.primary_rg_id()?;
+        let rg_id = rg_id_owned.as_deref();
 
         // Compute mapped mate's per-chr position for co-location
         let chr_start = genome.chr_start[mapped_transcript.chr_idx];
@@ -574,8 +574,8 @@ impl SamWriter {
         params: &Parameters,
     ) -> Result<Vec<RecordBuf>, Error> {
         let mut records = Vec::with_capacity(2);
-        let rg_ids = params.rg_ids()?;
-        let rg_id = rg_ids.first().map(String::as_str);
+        let rg_id_owned = params.primary_rg_id()?;
+        let rg_id = rg_id_owned.as_deref();
 
         // Mate1 record
         let mut rec1 = RecordBuf::default();

@@ -679,6 +679,17 @@ impl Parameters {
         Ok(lines)
     }
 
+    /// Read group ID emitted on SAM records (the first RG line's `ID:` value).
+    /// Returns `None` when no RG line is configured.
+    pub fn primary_rg_id(&self) -> Result<Option<String>, crate::error::Error> {
+        Ok(self.parsed_rg_lines()?.first().and_then(|body| {
+            body.split('\t')
+                .next()?
+                .strip_prefix("ID:")
+                .map(str::to_owned)
+        }))
+    }
+
     /// Per-file read group ID, replicated from a single RG line if needed.
     /// Returns empty vec when no RG line is set.
     pub fn rg_ids(&self) -> Result<Vec<String>, crate::error::Error> {

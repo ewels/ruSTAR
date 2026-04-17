@@ -472,8 +472,7 @@ fn align_reads_single_end<W: AlignmentWriter>(
     let max_multimaps = params.out_filter_multimap_nmax as usize;
     let output_unmapped = params.out_sam_unmapped != params::OutSamUnmapped::None;
     let by_sjout = params.out_filter_type == OutFilterType::BySJout;
-    let rg_ids = params.rg_ids()?;
-    let rg_id_owned = rg_ids.first().cloned();
+    let rg_id_owned = params.primary_rg_id()?;
 
     // Buffer for BySJout mode: accumulate all results before filtering
     let mut bysj_buffer: Vec<AlignmentBatchResults> = Vec::new();
