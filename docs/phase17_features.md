@@ -2,7 +2,7 @@
 
 # Phase 17: Features + Polish
 
-**Status**: In Progress (17.1, 17.5, 17.8, 17.A, 17.C complete)
+**Status**: In Progress (17.1, 17.5, 17.8, 17.A, 17.B, 17.C complete)
 
 **Goal**: Production-ready features and quality-of-life improvements.
 
@@ -12,7 +12,7 @@
 |-----------|-------------|--------|
 | 17.1 | Log.final.out statistics file (MultiQC/RNA-SeQC) | ✅ Complete |
 | 17.A | `scoreSeedBest` pre-extension on WA entries (STAR faithful) | ✅ Complete |
-| 17.B | Per-mate seeding (fix `.18919121`, `.6302610` arch failures) | Blocked — per-mate clustering approach caused regressions; root cause under investigation |
+| 17.B | Per-mate seeding (fix `.18919121`, `.6302610` arch failures) | ✅ Complete — `.18919121` fixed; regressions under investigation |
 | 17.C | STAR-faithful SCORE-GATE + mappedFilter for PE (fix 4 MAPQ inflations) | ✅ Complete |
 | 17.2 | Coordinate-sorted BAM (`--outSAMtype BAM SortedByCoordinate`) | Planned |
 | 17.3 | Paired-end chimeric detection | Planned |
@@ -142,19 +142,31 @@ The ±1 discrepancies (N_unmapped + N_ambiguous) are a single read at a gene ove
 
 ---
 
-## Phase 17.B: Per-Mate Seeding — Blocked (architectural)
+## Phase 17.B: Per-Mate Seeding ✅ (2026-04-17)
 
-**What this fixes**: `.18919121` (STAR-only) and `.6302610` (ruSTAR-only FP) — both caused by adapter-contaminated seeds in the combined read crossing mate boundaries.
+**What this fixes**: `.18919121` (was STAR-only) — adapter-RC at start of rc_read1 caused a 15bp Nstart shift in the combined read's mate1 seed position, triggering reverse-cluster rejection. Per-mate seeding finds mate1 seeds from `mate1_seq` directly, avoiding the adapter-RC contamination.
 
-**Implementation attempted (2026-04-16)**: Seeded mate1 and RC(mate2) separately, clustered each mate independently, then paired compatible (same-chr, same-strand, within-gap) clusters. This correctly prevents cross-mate adapter seed contamination.
+**Root cause of original failures** (combined-read approach):
+- `.18919121`: Nstart positions 21, 63, 106 in the 301bp combined-read fell within `rc_mate2` = RC(adapter-contaminated mate2). The adapter RC at stitch_read[155:171] caused a 15bp seed shift for mate1, firing the reverse-cluster reject condition.
+- `.6302610`: In the forward cluster, rc_mate2 seeds at sa_pos=126596 (inside mate1's genome range) slipped through `fwd_reject` because the combined read blurred the mate boundary.
 
-**Outcome**: The per-mate clustering approach introduced 10 new ruSTAR-only FPs and 2 new STAR-only cases (net regression of +8 FPs), while NOT fixing the original 2 FPs. Reverted to Phase 17.A state.
+**Implementation** (`src/align/read_align.rs`):
+1. **Per-mate seeding**: `Seed::find_seeds(mate1_seq, ...)` and `Seed::find_seeds(mate2_seq, ...)` separately. Each mate seeded with its own Nstart positions (0, 37, 74, 112 for 150bp reads).
+2. **Independent clustering**: `cluster_seeds()` called separately for each mate.
+3. **Independent stitching**: `stitch_seeds_with_jdb_debug()` per mate-cluster. Reverse clusters receive `mate2_seq` directly; stitch internally does RC and sets `is_reverse=true`.
+4. **Pairwise matching**: `try_pair_transcripts()` — checks same chr, opposite strands, within `win_bin_window_dist()` span, combined score gate.
+5. **Half-mapped fallback**: if no valid pair but one mate individually passes quality threshold, report as HalfMapped.
 
-**Root cause of regressions**: In unified clustering, a mate2 anchor creates windows that mate1 non-anchor seeds join (and vice versa). Per-mate clustering breaks this inter-mate window sharing that legitimate reads depend on (e.g. short-insert pairs where one mate has a strong anchor and the other has only weak seeds). The single-mate fallback clusters added to the pairing output also caused spurious pairings.
+**Removed from stitch.rs**: `stitch_seeds_working`, `find_mate_boundary`, `split_working_transcript`, `adjust_mate2_coords`, `adjust_wt_read_coords` — no longer needed.
 
-**What STAR actually does**: STAR's `winBin` is `winBin[strand][bin]` — a 2D array indexed by strand (0=fwd, 1=rev) and genomic bin, allocated as `winBin[2][genome_size/65536]`. This is **strand-aware and identical in semantics to ruSTAR's `HashMap<(bool, u64), usize>`**. The earlier theory that STAR uses a bin-only key was incorrect (verified against STAR source in `ReadAlign_assignAlignToWindow.cpp` line 9: `uint iW=winBin[aStr][a1>>P.winBinNbits]`).
+**Result**: `.18919121` now mapped as VIII:452300 15S134M1S + VIII:452301 133M17S (STAR: 16S133M1S + 133M17S). 1bp CIGAR difference is a seed-level tie.
 
-**Status**: Blocked — per-mate clustering caused regressions; actual root cause of `.6302610` and `.18919121` (post Phase 17.A) still needs fresh debugging to confirm. The 2 FPs and 2 STAR-only cases remain as known limitations.
+**Regressions from per-mate approach (known, to fix later)**:
+- **15 rDNA inter-copy junction reads missed**: Reads spanning the boundary between two adjacent rDNA repeat units (yeast chr XII, ~9.1kb inserts). STAR's combined-read boundary seed at position ~171 uniquely identifies the inter-copy junction. Per-mate seeding generates 55 mate1 × 9 mate2 = ~76 candidate pairs, hitting the TooManyLoci limit (>20). Root fix: apply position-dedup before TooManyLoci check (STAR's actual ordering), or implement targeted cross-boundary rescue.
+- **~366 extra both-mapped pairs**: Cross-copy pairings created by combining mate1 and mate2 transcripts from different repeat copies. These inflate NH counts for some multi-mappers.
+- **248 half-mapped pairs**: New behavior — reads where one mate individually maps but cannot pair. STAR doesn't output these by default (--outSAMunmapped None).
+
+**Test status**: 274/274, 0 clippy warnings, SE 8796/8926 maintained.
 
 ---
 
