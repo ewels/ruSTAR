@@ -547,6 +547,16 @@ pub struct Parameters {
     #[arg(long = "quantMode", num_args = 0..)]
     pub quant_mode: Vec<String>,
 
+    /// Output format variants for `--quantMode TranscriptomeSAM`:
+    ///   * `BanSingleEnd_BanIndels_ExtendSoftclip` (default, RSEM-compatible)
+    ///   * `BanSingleEnd` — keep indels and soft-clips
+    ///   * `BanSingleEnd_ExtendSoftclip` — keep indels, extend soft-clips
+    #[arg(
+        long = "quantTranscriptomeSAMoutput",
+        default_value = "BanSingleEnd_BanIndels_ExtendSoftclip"
+    )]
+    pub quant_transcriptome_sam_output: crate::quant::transcriptome::QuantTranscriptomeSAMoutput,
+
     // ── Two-pass ────────────────────────────────────────────────────────
     /// Two-pass mode: None or Basic
     #[arg(long = "twopassMode", default_value = "None")]
@@ -816,12 +826,24 @@ impl Parameters {
         }
         self.rg_ids()?;
 
+        // quantMode TranscriptomeSAM requires a GTF file
+        if self.quant_transcriptome_sam() && self.sjdb_gtf_file.is_none() {
+            return Err(crate::error::Error::Parameter(
+                "--quantMode TranscriptomeSAM requires --sjdbGTFfile".into(),
+            ));
+        }
+
         Ok(())
     }
 
     /// Returns true if `--quantMode GeneCounts` was requested.
     pub fn quant_gene_counts(&self) -> bool {
         self.quant_mode.iter().any(|m| m == "GeneCounts")
+    }
+
+    /// Returns true if `--quantMode TranscriptomeSAM` was requested.
+    pub fn quant_transcriptome_sam(&self) -> bool {
+        self.quant_mode.iter().any(|m| m == "TranscriptomeSAM")
     }
 }
 
@@ -1196,6 +1218,81 @@ mod tests {
     fn run_rng_seed_override() {
         let p = parse(&["--readFilesIn", "r.fq", "--runRNGseed", "42"]);
         assert_eq!(p.run_rng_seed, 42);
+    }
+
+    #[test]
+    fn quant_transcriptome_sam_default() {
+        use crate::quant::transcriptome::QuantTranscriptomeSAMoutput;
+        let p = parse(&["--readFilesIn", "r.fq"]);
+        assert!(!p.quant_transcriptome_sam());
+        assert_eq!(
+            p.quant_transcriptome_sam_output,
+            QuantTranscriptomeSAMoutput::BanSingleEndBanIndelsExtendSoftclip
+        );
+    }
+
+    #[test]
+    fn quant_transcriptome_sam_enabled() {
+        let p = parse(&[
+            "--readFilesIn",
+            "r.fq",
+            "--quantMode",
+            "TranscriptomeSAM",
+        ]);
+        assert!(p.quant_transcriptome_sam());
+        assert!(!p.quant_gene_counts());
+    }
+
+    #[test]
+    fn quant_transcriptome_sam_output_override() {
+        use crate::quant::transcriptome::QuantTranscriptomeSAMoutput;
+        let p = parse(&[
+            "--readFilesIn",
+            "r.fq",
+            "--quantTranscriptomeSAMoutput",
+            "BanSingleEnd",
+        ]);
+        assert_eq!(
+            p.quant_transcriptome_sam_output,
+            QuantTranscriptomeSAMoutput::BanSingleEnd
+        );
+
+        let p = parse(&[
+            "--readFilesIn",
+            "r.fq",
+            "--quantTranscriptomeSAMoutput",
+            "BanSingleEnd_ExtendSoftclip",
+        ]);
+        assert_eq!(
+            p.quant_transcriptome_sam_output,
+            QuantTranscriptomeSAMoutput::BanSingleEndExtendSoftclip
+        );
+    }
+
+    #[test]
+    fn validate_transcriptome_sam_needs_gtf() {
+        let p = parse(&[
+            "--readFilesIn",
+            "r.fq",
+            "--quantMode",
+            "TranscriptomeSAM",
+        ]);
+        let err = p.validate().unwrap_err();
+        assert!(err.to_string().contains("TranscriptomeSAM"));
+        assert!(err.to_string().contains("sjdbGTFfile"));
+    }
+
+    #[test]
+    fn validate_transcriptome_sam_with_gtf_ok() {
+        let p = parse(&[
+            "--readFilesIn",
+            "r.fq",
+            "--quantMode",
+            "TranscriptomeSAM",
+            "--sjdbGTFfile",
+            "genes.gtf",
+        ]);
+        assert!(p.validate().is_ok());
     }
 
     #[test]
