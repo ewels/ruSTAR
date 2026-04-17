@@ -643,40 +643,30 @@ impl Parameters {
 
     /// Parse `--outSAMattrRGline` into one tab-joined body per `@RG` block.
     ///
-    /// Mirrors `Parameters_readFilesInit.cpp:65-82`: tokens are joined by tabs
-    /// until a bare `,` token starts a new block. Each block's first token must
-    /// begin with `ID:`.
+    /// Mirrors `Parameters_readFilesInit.cpp:65-82`: tokens are split on bare
+    /// `,` separators, and each resulting block's first token must begin with
+    /// `ID:`. An empty block (adjacent commas or a trailing comma) is an error.
     pub fn parsed_rg_lines(&self) -> Result<Vec<String>, crate::error::Error> {
         if !self.rg_line_set() {
             return Ok(Vec::new());
         }
-        let mut lines: Vec<String> = Vec::new();
-        let mut i = 0;
-        while i < self.out_sam_attr_rg_line.len() {
-            let tok = &self.out_sam_attr_rg_line[i];
-            if i > 0 && tok == "," {
-                i += 1;
-                if i >= self.out_sam_attr_rg_line.len() {
-                    break;
+        self.out_sam_attr_rg_line
+            .split(|tok| tok == ",")
+            .map(|block| {
+                let first = block.first().ok_or_else(|| {
+                    crate::error::Error::Parameter(
+                        "--outSAMattrRGline: empty RG block".into(),
+                    )
+                })?;
+                if !first.starts_with("ID:") {
+                    return Err(crate::error::Error::Parameter(format!(
+                        "--outSAMattrRGline: first field of each RG line must start with 'ID:', got '{}'",
+                        first
+                    )));
                 }
-            }
-            let first = &self.out_sam_attr_rg_line[i];
-            if !first.starts_with("ID:") {
-                return Err(crate::error::Error::Parameter(format!(
-                    "--outSAMattrRGline: first field of each RG line must start with 'ID:', got '{}'",
-                    first
-                )));
-            }
-            let mut body = first.clone();
-            i += 1;
-            while i < self.out_sam_attr_rg_line.len() && self.out_sam_attr_rg_line[i] != "," {
-                body.push('\t');
-                body.push_str(&self.out_sam_attr_rg_line[i]);
-                i += 1;
-            }
-            lines.push(body);
-        }
-        Ok(lines)
+                Ok(block.join("\t"))
+            })
+            .collect()
     }
 
     /// Read group ID emitted on SAM records (the first RG line's `ID:` value).
