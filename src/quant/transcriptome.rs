@@ -16,6 +16,85 @@ use crate::align::transcript::{CigarOp, Exon, Transcript};
 use crate::error::Error;
 use crate::genome::Genome;
 use crate::junction::gtf::GtfRecord;
+use crate::params::Parameters;
+
+// ---------------------------------------------------------------------------
+// Filter-mode enum + softclip extension (subtask 3)
+// ---------------------------------------------------------------------------
+
+/// STAR's `--quantTranscriptomeSAMoutput` value.
+///
+/// Controls how alignments are filtered / adjusted before being projected
+/// onto the transcriptome:
+///   * `BanSingleEndBanIndelsExtendSoftclip` (STAR default, RSEM-compatible) —
+///     reject alignments containing indels; reject PE alignments where both
+///     sides of the read come from a single mate; extend soft-clipped bases
+///     back into matched bases (re-counting mismatches).
+///   * `BanSingleEnd` — only reject single-mate-only PE alignments; keep
+///     indels and soft-clips as-is.
+///   * `BanSingleEndExtendSoftclip` — reject single-mate-only PE alignments;
+///     keep indels; extend soft-clips.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuantTranscriptomeSAMoutput {
+    /// Default: ban indels, ban single-mate PE hits, extend soft-clips.
+    BanSingleEndBanIndelsExtendSoftclip,
+    /// Ban single-mate PE hits only; keep indels and soft-clips.
+    BanSingleEnd,
+    /// Ban single-mate PE hits; keep indels; extend soft-clips.
+    BanSingleEndExtendSoftclip,
+}
+
+impl Default for QuantTranscriptomeSAMoutput {
+    fn default() -> Self {
+        Self::BanSingleEndBanIndelsExtendSoftclip
+    }
+}
+
+impl std::str::FromStr for QuantTranscriptomeSAMoutput {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "BanSingleEnd_BanIndels_ExtendSoftclip" => {
+                Ok(Self::BanSingleEndBanIndelsExtendSoftclip)
+            }
+            "BanSingleEnd" => Ok(Self::BanSingleEnd),
+            "BanSingleEnd_ExtendSoftclip" => Ok(Self::BanSingleEndExtendSoftclip),
+            _ => Err(format!(
+                "unknown --quantTranscriptomeSAMoutput '{s}'; expected \
+                 'BanSingleEnd_BanIndels_ExtendSoftclip', 'BanSingleEnd', or \
+                 'BanSingleEnd_ExtendSoftclip'"
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for QuantTranscriptomeSAMoutput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BanSingleEndBanIndelsExtendSoftclip => {
+                write!(f, "BanSingleEnd_BanIndels_ExtendSoftclip")
+            }
+            Self::BanSingleEnd => write!(f, "BanSingleEnd"),
+            Self::BanSingleEndExtendSoftclip => write!(f, "BanSingleEnd_ExtendSoftclip"),
+        }
+    }
+}
+
+impl QuantTranscriptomeSAMoutput {
+    /// Whether indels are permitted in the output.
+    pub fn allow_indels(self) -> bool {
+        !matches!(self, Self::BanSingleEndBanIndelsExtendSoftclip)
+    }
+    /// Whether single-mate-only PE alignments are permitted.
+    pub fn allow_single_end(self) -> bool {
+        false // all three modes ban single-end
+    }
+    /// Whether soft-clipped bases should be kept (true) or extended back into
+    /// matched bases (false).
+    pub fn allow_softclip(self) -> bool {
+        matches!(self, Self::BanSingleEnd)
+    }
+}
 
 /// Per-transcript exon in absolute genome coordinates (0-based half-open),
 /// paired with the cumulative transcript-space length of all preceding exons
@@ -439,6 +518,223 @@ fn align_to_one_transcript(
     })
 }
 
+/// Filter a genome-space alignment per `--quantTranscriptomeSAMoutput`
+/// semantics and return the resulting transcriptome-space projections.
+///
+/// Mirrors STAR `ReadAlign::quantTranscriptome` (see
+/// `source/ReadAlign_quantTranscriptome.cpp:9-66`):
+///   1. If `!indel_ok && (n_ins > 0 || n_del > 0)` → skip.
+///   2. If `!single_end_ok && readNmates==2 && all blocks from same mate` →
+///      skip.  ruSTAR does not carry per-block mate tags on SE/PE transcript
+///      exons; callers should only invoke this function on both-mapped PE
+///      `PairedAlignment` mates, and single-end checks are effectively a
+///      no-op at the per-mate level.
+///   3. If `!softclip_ok` and the alignment has soft-clips at the 5'/3' ends,
+///      extend them back into matched bases.  Extension mismatches are added
+///      to `nMM1` and the alignment is rejected if `nMM + nMM1 >
+///      min(outFilterMismatchNmax, outFilterMismatchNoverLmax*(Lread-1))`.
+///   4. Finally call `align_to_transcripts` to project onto all transcripts.
+///
+/// `genome_fwd_bases` is the forward-strand read sequence in genome base
+/// encoding (A=0,C=1,G=2,T=3,N=4), used for mismatch checks in the softclip
+/// extension step.  For reverse-strand alignments, STAR pulls the RC read via
+/// `Read1[roStr==0 ? 0 : 2]`; pass the RC-encoded bases here for reverse
+/// alignments.
+pub fn filter_and_project(
+    align: &Transcript,
+    read_bases_align_orientation: &[u8],
+    genome: &Genome,
+    idx: &TranscriptomeIndex,
+    lread: u32,
+    mode: QuantTranscriptomeSAMoutput,
+    params: &Parameters,
+) -> Vec<Transcript> {
+    // (1) Indel filter.
+    if !mode.allow_indels() && align.n_gap > 0 {
+        return Vec::new();
+    }
+
+    // (2) Single-end filter: for PE, we reject alignments where both ends of
+    // the read came from the same mate.  ruSTAR's `Transcript` does not carry
+    // per-block `EX_iFrag` tags — this check is enforced at the caller level
+    // (only invoking `filter_and_project` on both-mapped pair mates means we
+    // never see single-mate alignments here).  Left as a no-op guard: if a
+    // caller passes a single-mate alignment with `allow_single_end() == false`,
+    // we currently do not reject it.  See subtask-5 wiring where the filter is
+    // applied at the PE boundary.
+
+    // (3) Soft-clip extension.
+    let align_for_projection = if mode.allow_softclip() || !has_soft_clip(align) {
+        align.clone()
+    } else {
+        match extend_softclips(align, read_bases_align_orientation, genome, lread, params) {
+            Some(extended) => extended,
+            None => return Vec::new(),
+        }
+    };
+
+    // (4) Project onto transcripts.
+    align_to_transcripts(&align_for_projection, idx, lread)
+}
+
+fn has_soft_clip(align: &Transcript) -> bool {
+    align
+        .cigar
+        .iter()
+        .any(|op| matches!(op, CigarOp::SoftClip(n) if *n > 0))
+}
+
+/// Extend the 5'/3' soft-clips of `align` back into matched bases, counting
+/// mismatches.  Returns `None` if the extension exceeds the mismatch budget.
+fn extend_softclips(
+    align: &Transcript,
+    read_bases_align_orientation: &[u8],
+    genome: &Genome,
+    lread: u32,
+    params: &Parameters,
+) -> Option<Transcript> {
+    // Determine left / right clip sizes from the CIGAR.
+    let (left_clip, right_clip) = align.count_soft_clips();
+
+    let mut n_mm_extra: u32 = 0;
+
+    // Walk the left-clip: bases `[first_exon.read_start - left_clip,
+    // first_exon.read_start)` in read space, `[first_exon.genome_start -
+    // left_clip, first_exon.genome_start)` in genome space.
+    if left_clip > 0
+        && let Some(first) = align.exons.first()
+    {
+        for b in 1..=left_clip as usize {
+            if b > first.read_start {
+                break;
+            }
+            if (first.genome_start as usize) < b {
+                break;
+            }
+            let r_idx = first.read_start - b;
+            let g_idx = (first.genome_start as usize) - b;
+            if r_idx >= read_bases_align_orientation.len() || g_idx >= genome.sequence.len() {
+                break;
+            }
+            let r1 = read_bases_align_orientation[r_idx];
+            let g1 = genome.sequence[g_idx];
+            if r1 != g1 && r1 < 4 && g1 < 4 {
+                n_mm_extra += 1;
+            }
+        }
+    }
+
+    // Walk the right-clip: bases `[last_exon.read_end, last_exon.read_end +
+    // right_clip)` in read space, `[last_exon.genome_end, last_exon.genome_end
+    // + right_clip)` in genome space.
+    if right_clip > 0
+        && let Some(last) = align.exons.last()
+    {
+        for b in 0..right_clip as usize {
+            let r_idx = last.read_end + b;
+            let g_idx = (last.genome_end as usize) + b;
+            if r_idx >= read_bases_align_orientation.len() || g_idx >= genome.sequence.len() {
+                break;
+            }
+            let r1 = read_bases_align_orientation[r_idx];
+            let g1 = genome.sequence[g_idx];
+            if r1 != g1 && r1 < 4 && g1 < 4 {
+                n_mm_extra += 1;
+            }
+        }
+    }
+
+    // Apply STAR's mismatch budget.
+    let mismatch_nmax_abs = params.out_filter_mismatch_nmax;
+    let mismatch_nmax_rel = ((params.out_filter_mismatch_nover_lmax
+        * (lread.saturating_sub(1) as f64))
+        .floor()) as u32;
+    let budget = mismatch_nmax_abs.min(mismatch_nmax_rel);
+    if align.n_mismatch.saturating_add(n_mm_extra) > budget {
+        return None;
+    }
+
+    // Construct the extended alignment: remove the soft-clip CIGAR ops and
+    // extend the leading/trailing match blocks.
+    let mut ext = align.clone();
+    ext.n_mismatch = ext.n_mismatch.saturating_add(n_mm_extra);
+    // Extend first exon to absorb left clip.
+    if left_clip > 0
+        && let Some(first) = ext.exons.first_mut()
+    {
+        let actual_left = left_clip.min(first.read_start as u32) as u64;
+        let actual_left = actual_left.min(first.genome_start);
+        first.read_start -= actual_left as usize;
+        first.genome_start -= actual_left;
+    }
+    if right_clip > 0
+        && let Some(last) = ext.exons.last_mut()
+    {
+        let actual_right = right_clip as u64;
+        last.read_end += actual_right as usize;
+        last.genome_end += actual_right;
+    }
+
+    // Rebuild CIGAR: drop leading/trailing S; extend the first/last M length.
+    ext.cigar = rebuild_cigar_without_softclips(&align.cigar, left_clip, right_clip);
+    ext.genome_start = ext.exons.first().map(|e| e.genome_start).unwrap_or(ext.genome_start);
+    ext.genome_end = ext.exons.last().map(|e| e.genome_end).unwrap_or(ext.genome_end);
+    Some(ext)
+}
+
+/// Strip the leading/trailing `SoftClip` ops and fold their lengths into the
+/// adjacent `Match` ops.  Interior soft-clips (rare — only appear in chimeric
+/// contexts) are left alone.
+fn rebuild_cigar_without_softclips(
+    cigar: &[CigarOp],
+    left_clip: u32,
+    right_clip: u32,
+) -> Vec<CigarOp> {
+    let mut out: Vec<CigarOp> = Vec::with_capacity(cigar.len());
+    let mut start_idx = 0;
+    let mut end_idx = cigar.len();
+    if left_clip > 0
+        && matches!(cigar.first(), Some(CigarOp::SoftClip(_)))
+    {
+        start_idx = 1;
+    }
+    if right_clip > 0
+        && end_idx > start_idx
+        && matches!(cigar[end_idx - 1], CigarOp::SoftClip(_))
+    {
+        end_idx -= 1;
+    }
+
+    let body = &cigar[start_idx..end_idx];
+    for (i, op) in body.iter().enumerate() {
+        if i == 0 && left_clip > 0 {
+            // Fold left_clip into the first op if it's match-like.
+            match op {
+                CigarOp::Match(n) => out.push(CigarOp::Match(n + left_clip)),
+                CigarOp::Equal(n) => out.push(CigarOp::Equal(n + left_clip)),
+                _ => {
+                    // Extension landed on a non-match op (shouldn't normally
+                    // happen).  Emit as Match.
+                    out.push(CigarOp::Match(left_clip));
+                    out.push(*op);
+                }
+            }
+        } else if i + 1 == body.len() && right_clip > 0 {
+            match op {
+                CigarOp::Match(n) => out.push(CigarOp::Match(n + right_clip)),
+                CigarOp::Equal(n) => out.push(CigarOp::Equal(n + right_clip)),
+                _ => {
+                    out.push(*op);
+                    out.push(CigarOp::Match(right_clip));
+                }
+            }
+        } else {
+            out.push(*op);
+        }
+    }
+    out
+}
+
 /// Find the transcript exon (by index in `tr_exons`) that contains position
 /// `pos` (0-based genome coord).  Returns `None` if `pos` is in an intron or
 /// outside the transcript.
@@ -856,6 +1152,237 @@ mod tests {
         );
         let results = align_to_transcripts(&align, &idx, 50);
         assert_eq!(results.len(), 2);
+    }
+
+    // ---- Subtask 3: filter-mode tests ----
+
+    fn default_params() -> Parameters {
+        use clap::Parser;
+        Parameters::parse_from(vec!["ruSTAR", "--readFilesIn", "r.fq"])
+    }
+
+    #[test]
+    fn mode_from_str_all_three() {
+        use std::str::FromStr;
+        assert_eq!(
+            QuantTranscriptomeSAMoutput::from_str("BanSingleEnd_BanIndels_ExtendSoftclip")
+                .unwrap(),
+            QuantTranscriptomeSAMoutput::BanSingleEndBanIndelsExtendSoftclip,
+        );
+        assert_eq!(
+            QuantTranscriptomeSAMoutput::from_str("BanSingleEnd").unwrap(),
+            QuantTranscriptomeSAMoutput::BanSingleEnd,
+        );
+        assert_eq!(
+            QuantTranscriptomeSAMoutput::from_str("BanSingleEnd_ExtendSoftclip").unwrap(),
+            QuantTranscriptomeSAMoutput::BanSingleEndExtendSoftclip,
+        );
+        assert!(QuantTranscriptomeSAMoutput::from_str("garbage").is_err());
+    }
+
+    #[test]
+    fn mode_flags() {
+        assert!(
+            !QuantTranscriptomeSAMoutput::BanSingleEndBanIndelsExtendSoftclip.allow_indels()
+        );
+        assert!(!QuantTranscriptomeSAMoutput::BanSingleEndBanIndelsExtendSoftclip.allow_softclip());
+        assert!(QuantTranscriptomeSAMoutput::BanSingleEnd.allow_indels());
+        assert!(QuantTranscriptomeSAMoutput::BanSingleEnd.allow_softclip());
+        assert!(QuantTranscriptomeSAMoutput::BanSingleEndExtendSoftclip.allow_indels());
+        assert!(!QuantTranscriptomeSAMoutput::BanSingleEndExtendSoftclip.allow_softclip());
+    }
+
+    #[test]
+    fn filter_default_rejects_indels() {
+        let genome = make_genome();
+        let gtf = vec![make_exon("chr1", 101, 300, '+', "G1", "T1")];
+        let idx = TranscriptomeIndex::from_gtf_exons(&gtf, &genome).unwrap();
+        let mut align = make_align(
+            0,
+            false,
+            vec![(110, 150, 0, 40)],
+            vec![CigarOp::Match(40)],
+        );
+        align.n_gap = 1; // simulate insertion/deletion
+        let params = default_params();
+        let read = vec![0u8; 40];
+        let results = filter_and_project(
+            &align,
+            &read,
+            &genome,
+            &idx,
+            40,
+            QuantTranscriptomeSAMoutput::BanSingleEndBanIndelsExtendSoftclip,
+            &params,
+        );
+        assert_eq!(results.len(), 0);
+    }
+
+    #[test]
+    fn filter_keeps_indels_when_allowed() {
+        let genome = make_genome();
+        let gtf = vec![make_exon("chr1", 101, 300, '+', "G1", "T1")];
+        let idx = TranscriptomeIndex::from_gtf_exons(&gtf, &genome).unwrap();
+        let mut align = make_align(
+            0,
+            false,
+            vec![(110, 150, 0, 40)],
+            vec![CigarOp::Match(40)],
+        );
+        align.n_gap = 1;
+        let params = default_params();
+        let read = vec![0u8; 40];
+        let results = filter_and_project(
+            &align,
+            &read,
+            &genome,
+            &idx,
+            40,
+            QuantTranscriptomeSAMoutput::BanSingleEnd,
+            &params,
+        );
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn filter_extends_left_softclip_with_zero_mismatches() {
+        // Build a custom genome with known content so we can construct a
+        // read whose soft-clipped bases match the adjacent genome.
+        let mut seq = vec![4u8; 1000];
+        // Place pattern "AAAA" at genome [100, 104) — clip region
+        for i in 100..104 {
+            seq[i] = 0; // A
+        }
+        // Aligned region [104, 144) — fill with zeros (A) so read bases match
+        for i in 104..144 {
+            seq[i] = 0;
+        }
+        let genome = Genome {
+            sequence: seq,
+            n_genome: 1000,
+            n_chr_real: 1,
+            chr_start: vec![0, 1000],
+            chr_length: vec![1000],
+            chr_name: vec!["chr1".to_string()],
+        };
+
+        let gtf = vec![make_exon("chr1", 1, 1000, '+', "G1", "T1")];
+        let idx = TranscriptomeIndex::from_gtf_exons(&gtf, &genome).unwrap();
+
+        // Align: 4S + 40M starting at genome 104, read [4..44).
+        let align = make_align(
+            0,
+            false,
+            vec![(104, 144, 4, 44)],
+            vec![CigarOp::SoftClip(4), CigarOp::Match(40)],
+        );
+        // Read is 44 bases of A (0s) — matches all of genome [100, 144).
+        let read = vec![0u8; 44];
+
+        let params = default_params();
+        let results = filter_and_project(
+            &align,
+            &read,
+            &genome,
+            &idx,
+            44,
+            QuantTranscriptomeSAMoutput::BanSingleEndBanIndelsExtendSoftclip,
+            &params,
+        );
+        assert_eq!(results.len(), 1);
+        let r = &results[0];
+        // CIGAR should now be a single 44M (4S folded into leading M).
+        assert_eq!(r.cigar.len(), 1);
+        match r.cigar[0] {
+            CigarOp::Match(n) => assert_eq!(n, 44),
+            _ => panic!("expected Match(44)"),
+        }
+    }
+
+    #[test]
+    fn filter_extends_softclip_too_many_mismatches_rejects() {
+        // Left clip is 4 bases, all mismatches.  n_mismatch = 0 to start.
+        // With very tight out_filter_mismatch_nmax, the alignment is rejected.
+        let mut seq = vec![4u8; 1000];
+        // Clip region [100, 104): all zeros (A)
+        for i in 100..104 {
+            seq[i] = 0;
+        }
+        // Aligned region [104, 144): all zeros
+        for i in 104..144 {
+            seq[i] = 0;
+        }
+        let genome = Genome {
+            sequence: seq,
+            n_genome: 1000,
+            n_chr_real: 1,
+            chr_start: vec![0, 1000],
+            chr_length: vec![1000],
+            chr_name: vec!["chr1".to_string()],
+        };
+        let gtf = vec![make_exon("chr1", 1, 1000, '+', "G1", "T1")];
+        let idx = TranscriptomeIndex::from_gtf_exons(&gtf, &genome).unwrap();
+
+        let align = make_align(
+            0,
+            false,
+            vec![(104, 144, 4, 44)],
+            vec![CigarOp::SoftClip(4), CigarOp::Match(40)],
+        );
+        // Read clip bases are all T (3) — mismatch against genome A (0)
+        let mut read = vec![0u8; 44];
+        for b in read.iter_mut().take(4) {
+            *b = 3;
+        }
+
+        let mut params = default_params();
+        params.out_filter_mismatch_nmax = 2; // budget = 2
+        let results = filter_and_project(
+            &align,
+            &read,
+            &genome,
+            &idx,
+            44,
+            QuantTranscriptomeSAMoutput::BanSingleEndBanIndelsExtendSoftclip,
+            &params,
+        );
+        // 4 extension mismatches > 2 → rejected
+        assert_eq!(results.len(), 0);
+    }
+
+    #[test]
+    fn filter_mode_single_end_keeps_softclip_as_is() {
+        let genome = make_genome();
+        let gtf = vec![make_exon("chr1", 101, 300, '+', "G1", "T1")];
+        let idx = TranscriptomeIndex::from_gtf_exons(&gtf, &genome).unwrap();
+
+        let align = make_align(
+            0,
+            false,
+            vec![(110, 150, 4, 44)],
+            vec![CigarOp::SoftClip(4), CigarOp::Match(40)],
+        );
+        let read = vec![0u8; 44];
+        let params = default_params();
+
+        // Mode BanSingleEnd → keep soft-clips as-is (no extension).
+        let results = filter_and_project(
+            &align,
+            &read,
+            &genome,
+            &idx,
+            44,
+            QuantTranscriptomeSAMoutput::BanSingleEnd,
+            &params,
+        );
+        assert_eq!(results.len(), 1);
+        // CIGAR preserves the soft-clip.
+        assert!(
+            results[0]
+                .cigar
+                .iter()
+                .any(|op| matches!(op, CigarOp::SoftClip(_)))
+        );
     }
 
     #[test]
