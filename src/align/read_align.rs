@@ -8,7 +8,7 @@ use crate::index::GenomeIndex;
 use crate::params::{IntronMotifFilter, IntronStrandFilter, Parameters};
 use crate::stats::UnmappedReason;
 use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
-use std::hash::{Hash, Hasher};
+use std::hash::{DefaultHasher, Hash, Hasher};
 
 /// Derive a deterministic per-read RNG seed from `run_rng_seed` + the read name.
 ///
@@ -18,7 +18,7 @@ use std::hash::{Hash, Hasher};
 /// breaks reproducible regardless of thread count while still honoring the
 /// user's `--runRNGseed` value.
 fn per_read_seed(run_rng_seed: u64, read_name: &str) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut hasher = DefaultHasher::new();
     read_name.hash(&mut hasher);
     run_rng_seed.wrapping_mul(hasher.finish().wrapping_add(1))
 }
