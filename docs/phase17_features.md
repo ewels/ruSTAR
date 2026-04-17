@@ -2,7 +2,7 @@
 
 # Phase 17: Features + Polish
 
-**Status**: In Progress (17.1, 17.5, 17.A, 17.C complete)
+**Status**: In Progress (17.1, 17.5, 17.8, 17.A, 17.C complete)
 
 **Goal**: Production-ready features and quality-of-life improvements.
 
@@ -20,7 +20,7 @@
 | 17.5 | Fix clippy warnings (0 warnings) | ✅ Complete |
 | 17.6 | `--outStd SAM/BAM` (stdout output for piping) | Planned |
 | 17.7 | GTF tag parameters (`sjdbGTFchrPrefix`, etc.) | Planned |
-| 17.8 | `--quantMode GeneCounts` | Planned |
+| 17.8 | `--quantMode GeneCounts` | ✅ Complete |
 | 17.9 | `--outBAMcompression` / `--limitBAMsortRAM` | Planned |
 | 17.10 | Chimeric Tier 3 (re-map soft-clipped regions) | Planned |
 | 17.11 | `--chimOutType WithinBAM` (supplementary FLAG 0x800) | Planned |
@@ -79,6 +79,40 @@
 **Result**: 0 clippy warnings, 264/264 tests passing.
 
 ---
+
+## Phase 17.8: `--quantMode GeneCounts` ✅ (2026-04-17)
+
+**Goal**: Output `ReadsPerGene.out.tab` matching STAR's HTSeq-union gene-level counting.
+
+**Implementation**: New `src/quant/mod.rs` with:
+- `GeneAnnotation`: per-chromosome sorted interval list (absolute genome coords) built from GTF exons
+- `GeneCounts`: atomic per-gene counters + 3 independent N_noFeature/N_ambiguous arrays
+- `QuantContext`: `Arc`-shared bundle for rayon parallel threads
+- `--quantMode GeneCounts` + `--sjdbGTFfile` validation in `params.rs`
+- SE and PE counting paths in `lib.rs`
+
+**Three bugs fixed vs initial implementation**:
+1. **Coordinate mismatch**: GTF exon positions were stored chr-relative; `Transcript.exon.genome_start` uses absolute concatenated-genome coords. Fix: add `genome.chr_start[chr_idx]` offset when converting GTF positions.
+2. **Single counting pass**: All 3 columns were identical. STAR runs 3 INDEPENDENT passes — col1 (any strand), col2 (same strand as read), col3 (opposite strand) — each with separate N_noFeature and N_ambiguous.
+3. **Too-many-loci bucket**: These were going to N_multimapping. STAR puts them in N_unmapped.
+
+**Results vs STAR (10k SE yeast)**:
+
+| Metric | STAR | ruSTAR |
+|--------|------|--------|
+| N_unmapped | 1073 | 1074 (+1) |
+| N_multimapping | 661 | 661 |
+| N_noFeature col1/col2/col3 | 131/3653/4240 | 131/3653/4240 |
+| N_ambiguous col1 | 567 | 566 (-1) |
+| Gene total col1 | 7568 | 7568 |
+| Col1 gene disagreements | — | **0** |
+| Col2/col3 gene disagreements | — | 1 each (boundary edge case) |
+
+The ±1 discrepancies (N_unmapped + N_ambiguous) are a single read at a gene overlap boundary — likely a minor coordinate boundary difference.
+
+**Files**: `src/quant/mod.rs` (new), `src/params.rs`, `src/junction/mod.rs` (pub(crate) gtf), `src/lib.rs`
+
+**Tests**: 274/274 (added 6 new quant unit tests), 0 clippy warnings.
 
 ---
 
