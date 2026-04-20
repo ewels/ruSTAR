@@ -663,6 +663,7 @@ pub fn align_paired_read(
                 len2,
                 params,
                 combined_score_threshold,
+                &scorer,
             ) {
                 joint_pairs.push(pair);
             }
@@ -693,24 +694,12 @@ pub fn align_paired_read(
         }
     }
 
-    // --- Decision tree: score-filter, dedup, quality-filter, then half-mapped fallback ---
-    // Step 1: score-range filter (STAR's multMapSelect).
-    if !joint_pairs.is_empty() {
-        let best_score = joint_pairs
-            .iter()
-            .map(|pa| pa.combined_wt_score)
-            .max()
-            .unwrap_or(0);
-        let score_threshold = best_score - params.out_filter_multimap_score_range;
-        joint_pairs.retain(|pa| pa.combined_wt_score >= score_threshold);
-    }
+    // --- Decision tree: dedup, score-filter, quality-filter, then half-mapped fallback ---
 
-    // Step 2: TooManyLoci check using pre-dedup count.
-    if joint_pairs.len() > params.out_filter_multimap_nmax as usize {
-        return Ok((Vec::new(), 0, Some(UnmappedReason::TooManyLoci)));
-    }
-
-    // Step 3: position dedup — remove exact (chr, mate1_pos, mate2_pos, strand, CIGAR) duplicates.
+    // Step 1: position dedup — remove exact (chr, mate1_pos, mate2_pos, strand, CIGAR) duplicates.
+    // Run dedup BEFORE score-range filter so the backup pool is already deduplicated.
+    // (STAR's ordering is multMapSelect → dedup, but dedup before multMapSelect is equivalent
+    // since removing exact duplicates doesn't change the best score.)
     joint_pairs.sort_by(|a, b| {
         let pos_cmp = (
             a.mate1_transcript.chr_idx,
@@ -808,6 +797,22 @@ pub fn align_paired_read(
             .filter(|(i, _)| keep[*i])
             .map(|(_, p)| p)
             .collect();
+    }
+
+    // Step 2: score-range filter (STAR's multMapSelect).
+    if !joint_pairs.is_empty() {
+        let best_score = joint_pairs
+            .iter()
+            .map(|pa| pa.combined_wt_score)
+            .max()
+            .unwrap_or(0);
+        let score_threshold = best_score - params.out_filter_multimap_score_range;
+        joint_pairs.retain(|pa| pa.combined_wt_score >= score_threshold);
+    }
+
+    // Step 3: TooManyLoci check (post-dedup, matching STAR's ordering: multMapSelect → dedup → TooManyLoci).
+    if joint_pairs.len() > params.out_filter_multimap_nmax as usize {
+        return Ok((Vec::new(), 0, Some(UnmappedReason::TooManyLoci)));
     }
 
     joint_pairs.sort_by(|a, b| {
@@ -910,6 +915,7 @@ fn try_pair_transcripts(
     len2: usize,
     params: &Parameters,
     combined_score_threshold: i32,
+    scorer: &AlignmentScorer,
 ) -> Option<PairedAlignment> {
     // Must be same chromosome
     if t1.chr_idx != t2.chr_idx {
@@ -944,8 +950,17 @@ fn try_pair_transcripts(
         return None;
     }
 
-    // Combined score: sum of per-mate finalized scores (each already includes per-mate span penalty)
-    let combined_wt_score = t1.score + t2.score;
+    // Combined score: STAR computes a single genomic-length penalty for the combined WT span.
+    // Per-mate scores each include their own span penalty (negative). We undo those and apply
+    // the combined span penalty, matching STAR's ReadAlign_stitchWindowSeeds.cpp behavior.
+    // combined_score = (t1.score - p1) + (t2.score - p2) + combined_p
+    let t1_span = t1.genome_end - t1.genome_start;
+    let t2_span = t2.genome_end - t2.genome_start;
+    let combined_span = right.genome_end - left.genome_start;
+    let p1 = scorer.genomic_length_penalty(t1_span);
+    let p2 = scorer.genomic_length_penalty(t2_span);
+    let combined_p = scorer.genomic_length_penalty(combined_span);
+    let combined_wt_score = t1.score + t2.score - p1 - p2 + combined_p;
 
     // SCORE-GATE: reject pairs where score is below the absolute floor
     if combined_wt_score + params.out_filter_multimap_score_range < combined_score_threshold {
