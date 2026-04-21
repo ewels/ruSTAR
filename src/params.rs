@@ -1214,7 +1214,7 @@ mod tests {
         let err = p.validate().unwrap_err();
         assert!(err.to_string().contains("RG"));
     }
-    
+
     fn run_rng_seed_override() {
         let p = parse(&["--readFilesIn", "r.fq", "--runRNGseed", "42"]);
         assert_eq!(p.run_rng_seed, 42);
