@@ -32,7 +32,7 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Status
 
-**278 tests passing, 0 clippy warnings.** SE: 8796/8926 compare_sam.py (98.5%), 2.2% splice rate (STAR: 2.2%), 66 shared junctions, **100.0% MAPQ agreement, MAPQ inflation: 0, deflation: 0**. 127 position disagreements (ALL verified as genuine ties). 1 CIGAR-only disagree (ERR12389696.13573895, insertion placement, seed-level tie). **0 STAR-only / 0 ruSTAR-only SE reads**. PE: **8767 both-mapped** (STAR: 8390), **236 half-mapped** (new behavior), 28 MAPQ inflations / 192 deflations (rDNA N² problem), **98.2% per-mate position agreement**, **93.920% PE exact faithfulness** (pos+CIGAR+MAPQ+proper+NH). Phase 17.A: `scoreSeedBest` pre-extension. Phase 17.B: per-mate seeding. Phase 17.C: STAR-faithful SCORE-GATE + mappedFilter (0 MAPQ inflations). Phase 17.D: combined-span penalty fix + dedup ordering (248→236 half-mapped). Phase 17.8: `--quantMode GeneCounts`. See [ROADMAP.md](ROADMAP.md) for detailed phase tracking and [docs/](docs/) for per-phase notes.
+**278 tests passing, 0 clippy warnings.** SE: 8796/8926 compare_sam.py (98.5%), 2.2% splice rate (STAR: 2.2%), 66 shared junctions, **100.0% MAPQ agreement, MAPQ inflation: 0, deflation: 0**. 127 position disagreements (ALL verified as genuine ties). 1 CIGAR-only disagree (ERR12389696.13573895, insertion placement, seed-level tie). **0 STAR-only / 0 ruSTAR-only SE reads**. PE: **8337 both-mapped** (STAR: 8390), **0 half-mapped**, 2 MAPQ inflations / 4 deflations, **98.9% per-mate position agreement**, **98.800% PE exact faithfulness** (pos+CIGAR+MAPQ+proper+NH), **0 proper-pair diffs**. Phase 17.A: `scoreSeedBest` pre-extension. Phase 17.B: per-mate seeding. Phase 17.C: STAR-faithful SCORE-GATE + mappedFilter. Phase 17.D: combined-span penalty fix + dedup ordering. Phase 17.8: `--quantMode GeneCounts`. Phase E fix (2026-04-21): mate_id-aware diagonal dedup. Phase E2 (2026-04-22): STAR-faithful combined-read seeding (97.370%→98.211%). Phase E3 (2026-04-22): combined-threshold for half-mapped fallback (98.211%→98.470%, half-mapped 311→0). Phase E4 (2026-04-22): PE-CHECK2 unconditional (98.470%→98.800%, both-mapped 8636→8337). See [ROADMAP.md](ROADMAP.md) for detailed phase tracking and [docs/](docs/) for per-phase notes.
 
 ## Source Layout
 
@@ -161,15 +161,17 @@ Previously listed issues now resolved:
 
 See [ROADMAP.md](ROADMAP.md) and [docs/](docs/) for full issue tracking.
 
-## PE Status (Updated 2026-04-17 — Phase 17.D)
+## PE Status (Updated 2026-04-22 — Phase E4: PE-CHECK2 unconditional)
 
-**Phase 17.D** (combined-span penalty + dedup ordering): **PE both-mapped = 8767** (STAR: 8390), **half-mapped = 236** (was 248 Phase 17.B), **98.2% per-mate position agreement**, **93.920% PE exact faithfulness**.
+**Phase E4** (PE-CHECK2 unconditional): **PE both-mapped = 8337** (STAR: 8390), **half-mapped = 0**, **98.9% per-mate position agreement**, **98.800% PE exact faithfulness** (was 98.470%). MAPQ inflations: 2 (was 4), deflations: 4 (was 34). NH diffs: 12 (was 50).
 
-**Two fixes in Phase 17.D**:
-1. `try_pair_transcripts` now computes STAR-faithful combined-span penalty: `combined_wt_score = t1.score + t2.score - p1 - p2 + combined_p`. Previously double-applied per-mate span penalties → AS tag wrong for 99.6% of PE reads. Now 3.1%.
-2. Decision tree reordered to (1) position dedup → (2) score-range filter → (3) TooManyLoci → (4) quality filter. Fixes 12 half-mapped pairs.
+**Phase E3** (2026-04-22, combined-threshold half-mapped): half-mapped 311→0, faithfulness 98.211%→98.470%.
 
-**Current PE parity**: 8767 vs STAR 8390 (+377 extra, mostly rDNA N² cross-copy pairs). 236 half-mapped. 28 MAPQ inflations / 192 deflations (rDNA N² problem). `.18919121` fixed (Phase 17.B). `.6302610` still FP.
+**Phase E fix** (2026-04-21, mate_id-aware diagonal dedup): raised faithfulness from 93.920%→97.370%. Still present.
+
+**Phase E4 implementation**: Removed `m1_exons.len() > 1` guard from PE-CHECK2 in `split_combined_wt`. STAR applies PE-CHECK2 unconditionally (verified via debug trace: `PE-CHECK2: m1_end=11656633 m2_estEnd=11656632 REJECT=1` for single-exon mate1). Previously ruSTAR only checked for spliced mate1, allowing overlapping/short-insert pairs through.
+
+**Current PE parity**: 8337 vs STAR 8390 (53 short). The 60 STAR-only pairs are heavily soft-clipped reads (50%+ clipped) where ruSTAR can't find sufficient seeds. Not a regression from PE-CHECK2.
 
 ## Remaining Limitations (Top 5)
 
