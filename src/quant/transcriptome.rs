@@ -405,6 +405,33 @@ impl TranscriptomeIndex {
         self.tr_end[i].saturating_sub(1)
     }
 
+    /// Write `geneInfo.tab` into `dir`, byte-for-byte matching STAR's
+    /// `GTF_transcriptGeneSJ.cpp:55-60` format:
+    ///
+    /// - Header: integer gene count.
+    /// - Per-gene line: `geneID\tgeneName\tgeneBiotype\n`
+    ///
+    /// Order is first-seen (same as STAR, which accumulates genes during
+    /// GTF parsing). Empty string if the GTF record had no `gene_name` /
+    /// `gene_biotype` attribute.
+    pub fn write_gene_info(&self, dir: &Path) -> Result<(), Error> {
+        let path = dir.join("geneInfo.tab");
+        let file = std::fs::File::create(&path).map_err(|e| Error::io(e, &path))?;
+        let mut out = std::io::BufWriter::new(file);
+
+        writeln!(out, "{}", self.gene_ids.len()).map_err(|e| Error::io(e, &path))?;
+        for ((id, name), biotype) in self
+            .gene_ids
+            .iter()
+            .zip(&self.gene_names)
+            .zip(&self.gene_biotypes)
+        {
+            writeln!(out, "{}\t{}\t{}", id, name, biotype).map_err(|e| Error::io(e, &path))?;
+        }
+
+        Ok(())
+    }
+
     /// Write `exonInfo.tab` into `dir`, byte-for-byte matching STAR's
     /// `GTF_transcriptGeneSJ.cpp:86-112` format:
     ///
@@ -1132,6 +1159,45 @@ mod tests {
              T_small\t100\t199\t199\t1\t1\t0\t0\n\
              T_big\t300\t699\t199\t1\t1\t1\t0\n\
              T_mid\t800\t899\t699\t1\t1\t2\t0\n"
+        );
+    }
+
+    #[test]
+    fn gene_info_tab_byte_format() {
+        let genome = make_genome();
+        let exons = vec![
+            make_exon_with_attrs(
+                "chr1",
+                101,
+                200,
+                '+',
+                "T1",
+                &[
+                    ("gene_id", "G1"),
+                    ("gene_name", "GENE1"),
+                    ("gene_biotype", "protein_coding"),
+                ],
+            ),
+            make_exon_with_attrs(
+                "chr1",
+                301,
+                400,
+                '+',
+                "T2",
+                &[("gene_id", "G2"), ("gene_name", "GENE2")],
+            ),
+            make_exon_with_attrs("chr1", 501, 600, '+', "T3", &[("gene_id", "G3")]),
+        ];
+        let idx = TranscriptomeIndex::from_gtf_exons(&exons, &genome).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        idx.write_gene_info(dir.path()).unwrap();
+        let body = std::fs::read_to_string(dir.path().join("geneInfo.tab")).unwrap();
+        assert_eq!(
+            body,
+            "3\n\
+             G1\tGENE1\tprotein_coding\n\
+             G2\tGENE2\t\n\
+             G3\t\t\n"
         );
     }
 
