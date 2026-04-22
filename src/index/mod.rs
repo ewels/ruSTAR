@@ -136,19 +136,18 @@ impl GenomeIndex {
             .write_all(self.sa_index.data.data())
             .map_err(|e| Error::io(e, &sai_path))?;
 
-        // Update genomeParameters.txt with SA file size
+        // Update genomeParameters.txt with SA file size. Matches STAR's
+        // `genomeFileSizes\t<n_genome> <sa_size>\n` pattern (tab before first
+        // value, space between subsequent values) — written out in
+        // Genome::write_genome_parameters_txt with `0` as the SA placeholder.
         let genome_params_path = dir.join("genomeParameters.txt");
         let sa_size = self.suffix_array.data.data().len();
-
-        // Read existing file, update genomeFileSizes line
         let content = fs::read_to_string(&genome_params_path)
             .map_err(|e| Error::io(e, &genome_params_path))?;
-
         let updated_content = content.replace(
-            &format!("genomeFileSizes\t{}\t0", self.genome.n_genome),
-            &format!("genomeFileSizes\t{}\t{}", self.genome.n_genome, sa_size),
+            &format!("genomeFileSizes\t{} 0", self.genome.n_genome),
+            &format!("genomeFileSizes\t{} {}", self.genome.n_genome, sa_size),
         );
-
         fs::write(&genome_params_path, updated_content)
             .map_err(|e| Error::io(e, &genome_params_path))?;
 

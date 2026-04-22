@@ -60,25 +60,28 @@ with open("annotations.gtf", "w") as f:
     f.write('chr2\ttest\texon\t1301\t1400\t.\t+\t.\tgene_id "G4"; transcript_id "T4";\n')
 PYEOF
 
-# STAR genomeGenerate.
-rm -rf star_index
-mkdir star_index
-STAR --runMode genomeGenerate --genomeDir star_index \
+# STAR and ruSTAR genomeGenerate — use the SAME genomeDir name (`index`)
+# so that the CLI-echo comment line in genomeParameters.txt matches too.
+# We just swap the on-disk directory between runs.
+rm -rf star_index rustar_index index
+mkdir index
+STAR --runMode genomeGenerate --genomeDir index \
      --genomeFastaFiles genome.fa --sjdbGTFfile annotations.gtf \
      --genomeSAindexNbases 5 --sjdbOverhang 49 --runThreadN 1 >/dev/null 2>&1
+mv index star_index
 
-# ruSTAR genomeGenerate.
-rm -rf rustar_index
-"$RUSTAR_BIN" --runMode genomeGenerate --genomeDir rustar_index \
+mkdir index
+"$RUSTAR_BIN" --runMode genomeGenerate --genomeDir index \
      --genomeFastaFiles genome.fa --sjdbGTFfile annotations.gtf \
      --genomeSAindexNbases 5 --sjdbOverhang 49 --runThreadN 1 >/dev/null 2>&1
+mv index rustar_index
 
 # Diff each file.
 pass=0
 fail=0
 for f in chrName.txt chrLength.txt chrStart.txt chrNameLength.txt \
          transcriptInfo.tab exonInfo.tab geneInfo.tab exonGeTrInfo.tab \
-         sjdbList.fromGTF.out.tab; do
+         sjdbList.fromGTF.out.tab genomeParameters.txt; do
     if diff -q "star_index/$f" "rustar_index/$f" >/dev/null 2>&1; then
         echo "✓ $f"
         pass=$((pass+1))

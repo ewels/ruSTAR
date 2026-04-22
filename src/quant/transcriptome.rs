@@ -1557,10 +1557,7 @@ mod tests {
         // the literal "MissingGeneType".
         assert_eq!(
             idx.gene_biotypes,
-            vec![
-                "protein_coding".to_string(),
-                "MissingGeneType".to_string()
-            ]
+            vec!["protein_coding".to_string(), "MissingGeneType".to_string()]
         );
         assert_eq!(idx.tr_gene_idx, vec![0, 0, 1]);
     }
