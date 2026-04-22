@@ -107,6 +107,84 @@ pub fn compute_shifts(genome: &[u8], s: u64, e: u64, n_genome_real: u64) -> (u8,
     (jj_l, jj_r)
 }
 
+/// A single junction with all metadata STAR needs to write the sjdb
+/// files and extend the genome. Positions are 0-based absolute genome
+/// coordinates; `start_pos` / `end_pos` are the FIRST and LAST bases of
+/// the intron (inclusive), already shifted left by `shift_left` so they
+/// sit at the canonical (left-most) representation of the motif.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedJunction {
+    /// Chromosome index the junction belongs to.
+    pub chr_idx: usize,
+    /// Shift-adjusted 0-based genome position of the first intron base.
+    pub start_pos: u64,
+    /// Shift-adjusted 0-based genome position of the last intron base.
+    pub end_pos: u64,
+    /// STAR motif code (`MOTIF_*`).
+    pub motif: u8,
+    /// Repeat length to the left of the (pre-shift) donor.
+    pub shift_left: u8,
+    /// Repeat length to the right of the (pre-shift) acceptor.
+    pub shift_right: u8,
+    /// STAR strand code (0 = unknown/dot, 1 = +, 2 = -).
+    pub strand: u8,
+}
+
+/// Convert a splice-junction database entry (as stored in
+/// `SpliceJunctionDb`) to a fully-prepared entry carrying motif, shifts,
+/// strand, and shift-adjusted coordinates.
+///
+/// - `chr_idx`, `intron_start`, `intron_end` are ruSTAR's 0-based absolute
+///   genome coordinates for the first/last bases of the intron.
+/// - `db_strand` is the strand as provided by the GTF / db
+///   (0 = unknown, 1 = +, 2 = -). If `0` and the motif encodes a strand,
+///   STAR picks the strand from the motif
+///   (`sjdbPrepare.cpp:184-188`: `2 - motif % 2`).
+/// - `genome` is the forward-strand genome byte slice
+///   (`Genome::sequence[..n_genome]`).
+/// - `n_genome_real` is the padded-but-without-sjdb genome length,
+///   matching STAR's `mapGen.nGenomeReal`.
+pub fn prepare_junction(
+    chr_idx: usize,
+    intron_start: u64,
+    intron_end: u64,
+    db_strand: u8,
+    genome: &[u8],
+    n_genome_real: u64,
+) -> PreparedJunction {
+    let motif = classify_motif(genome, intron_start, intron_end);
+    let (shift_left, shift_right) = compute_shifts(genome, intron_start, intron_end, n_genome_real);
+
+    // STAR's sjdbPrepare.cpp:71-72: after computing shifts, subtract
+    // shift_left from both start and end to put the junction at its
+    // canonical (left-most) representation.
+    let shifted_start = intron_start - shift_left as u64;
+    let shifted_end = intron_end - shift_left as u64;
+
+    let strand = match db_strand {
+        1 | 2 => db_strand,
+        _ => {
+            // Unknown db strand: derive from motif (STAR sjdbPrepare.cpp:184-188).
+            // `2 - motif % 2` maps 1/3/5 → 1 (+), 2/4/6 → 2 (-).
+            if motif == MOTIF_NON_CANONICAL {
+                0
+            } else {
+                2 - (motif % 2)
+            }
+        }
+    };
+
+    PreparedJunction {
+        chr_idx,
+        start_pos: shifted_start,
+        end_pos: shifted_end,
+        motif,
+        shift_left,
+        shift_right,
+        strand,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,6 +337,74 @@ mod tests {
         let (l, r) = compute_shifts(&g, 500, 1000, 2000);
         assert_eq!(l, 255);
         assert_eq!(r, 255);
+    }
+
+    #[test]
+    fn prepare_gt_ag_forward_no_repeat() {
+        let mut g = vec![4u8; 400]; // start with N
+        g[100] = 0;
+        g[101] = 0; // exon1 tail
+        g[102] = 2; // G: intron start
+        g[103] = 3; // T
+        g[198] = 0; // A
+        g[199] = 2; // G: intron end
+        g[200] = 1;
+        g[201] = 1;
+        let pj = prepare_junction(0, 102, 199, 1, &g, 400);
+        assert_eq!(pj.motif, MOTIF_GT_AG);
+        assert_eq!(pj.shift_left, 0);
+        assert_eq!(pj.shift_right, 0);
+        assert_eq!(pj.start_pos, 102);
+        assert_eq!(pj.end_pos, 199);
+        assert_eq!(pj.strand, 1);
+    }
+
+    #[test]
+    fn prepare_dot_strand_derived_from_motif() {
+        // Non-canonical motif with db_strand=0 → strand 0.
+        let g = vec![0u8; 300];
+        let pj = prepare_junction(0, 100, 200, 0, &g, 300);
+        assert_eq!(pj.motif, MOTIF_NON_CANONICAL);
+        assert_eq!(pj.strand, 0);
+
+        // GT/AG motif with db_strand=0 → strand derived = 1 (+).
+        let mut g = vec![4u8; 300];
+        g[100] = 2;
+        g[101] = 3;
+        g[199] = 0;
+        g[200] = 2;
+        let pj = prepare_junction(0, 100, 200, 0, &g, 300);
+        assert_eq!(pj.motif, MOTIF_GT_AG);
+        assert_eq!(pj.strand, 1);
+
+        // CT/AC motif with db_strand=0 → strand = 2 (-).
+        let mut g = vec![4u8; 300];
+        g[100] = 1;
+        g[101] = 3;
+        g[199] = 0;
+        g[200] = 1;
+        let pj = prepare_junction(0, 100, 200, 0, &g, 300);
+        assert_eq!(pj.motif, MOTIF_CT_AC);
+        assert_eq!(pj.strand, 2);
+    }
+
+    #[test]
+    fn prepare_shift_left_applied_to_coords() {
+        // Construct: one base of repeat to the left of the junction so
+        // shift_left = 1. Confirm start/end decrement by 1.
+        let mut g = vec![4u8; 400];
+        g[102] = 2; // G
+        g[103] = 3; // T
+        g[198] = 0; // A
+        g[199] = 2; // G
+        // Put identical 'G' at 101 and 199 so shift_left = 1.
+        g[101] = 2;
+        // Put different base at 100 to stop the scan.
+        g[100] = 3;
+        let pj = prepare_junction(0, 102, 199, 1, &g, 400);
+        assert_eq!(pj.shift_left, 1);
+        assert_eq!(pj.start_pos, 101);
+        assert_eq!(pj.end_pos, 198);
     }
 
     #[test]
