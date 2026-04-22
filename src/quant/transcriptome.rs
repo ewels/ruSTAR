@@ -349,6 +349,107 @@ impl TranscriptomeIndex {
         self.tr_ids.len()
     }
 
+    /// Load from STAR-compatible index files in `dir`.
+    ///
+    /// Requires `transcriptInfo.tab`, `exonInfo.tab`, `geneInfo.tab` to be
+    /// present — all written by either STAR's `genomeGenerate` or ruSTAR's
+    /// `write_*` methods. Returns a fully-populated index equivalent to
+    /// what `from_gtf_exons` would produce, except transcripts come back
+    /// in STAR's SORTED `(tr_start, tr_end)` order (not GTF insertion
+    /// order), because that's how `transcriptInfo.tab` is written.
+    pub fn from_index_dir(dir: &Path, genome: &Genome) -> Result<Self, Error> {
+        let (tr_ids, tr_start, tr_end, tr_strand, tr_exn, tr_exi, tr_gene_idx) =
+            read_transcript_info(&dir.join("transcriptInfo.tab"))?;
+        let (ex_start_rel, ex_end_rel_incl, ex_len_cum_flat) =
+            read_exon_info(&dir.join("exonInfo.tab"))?;
+        let (gene_ids, gene_names, gene_biotypes) = read_gene_info(&dir.join("geneInfo.tab"))?;
+
+        let n_tr = tr_ids.len();
+        let n_exons_total = ex_start_rel.len();
+
+        // Sanity: exon count in header must equal sum of trExN.
+        let sum_exn: u64 = tr_exn.iter().map(|&n| n as u64).sum();
+        if sum_exn != n_exons_total as u64 {
+            return Err(Error::Index(format!(
+                "transcriptome index inconsistent: sum(trExN)={} but exonInfo has {} rows",
+                sum_exn, n_exons_total
+            )));
+        }
+
+        // Reconstruct per-transcript TrExon lists + tr_length from flat exon
+        // arrays. `ex_start_rel[k]` is transcript-relative; add tr_start[i] to
+        // get absolute 0-based coords. `ex_end_rel_incl` is inclusive; add 1
+        // for ruSTAR's exclusive convention.
+        let mut tr_exons: Vec<Vec<TrExon>> = Vec::with_capacity(n_tr);
+        let mut tr_length: Vec<u32> = Vec::with_capacity(n_tr);
+        for i in 0..n_tr {
+            let start = tr_exi[i] as usize;
+            let end = start + tr_exn[i] as usize;
+            let tr_s = tr_start[i];
+            let mut exons: Vec<TrExon> = Vec::with_capacity(end - start);
+            let mut total: u32 = 0;
+            for k in start..end {
+                let gs = tr_s + ex_start_rel[k];
+                let ge = tr_s + ex_end_rel_incl[k] + 1;
+                exons.push(TrExon {
+                    genome_start: gs,
+                    genome_end: ge,
+                    ex_len_cum: ex_len_cum_flat[k],
+                });
+                total = total.saturating_add((ge - gs) as u32);
+            }
+            tr_exons.push(exons);
+            tr_length.push(total);
+        }
+
+        // Derive tr_chr_idx from each transcript's first exon genome_start.
+        let mut tr_chr_idx: Vec<usize> = Vec::with_capacity(n_tr);
+        for exs in &tr_exons {
+            let pos = exs
+                .first()
+                .map(|e| e.genome_start)
+                .ok_or_else(|| Error::Index("transcript with zero exons".into()))?;
+            let chr_idx = chr_idx_for_genome_pos(genome, pos)?;
+            tr_chr_idx.push(chr_idx);
+        }
+
+        // Legacy `tr_gene_id` string view from the integer index.
+        let tr_gene_id: Vec<String> = tr_gene_idx
+            .iter()
+            .map(|&g| gene_ids.get(g as usize).cloned().unwrap_or_default())
+            .collect();
+
+        // Sorted view: transcripts are already in sorted order on disk, so
+        // tr_order = identity.
+        let tr_order: Vec<usize> = (0..n_tr).collect();
+        let tr_starts_sorted: Vec<u64> = tr_start.clone();
+        let mut tr_end_max_sorted: Vec<u64> = Vec::with_capacity(n_tr);
+        let mut m: u64 = 0;
+        for &i in &tr_order {
+            m = m.max(tr_end[i]);
+            tr_end_max_sorted.push(m);
+        }
+
+        Ok(TranscriptomeIndex {
+            tr_ids,
+            tr_chr_idx,
+            tr_strand,
+            tr_gene_id,
+            tr_gene_idx,
+            gene_ids,
+            gene_names,
+            gene_biotypes,
+            tr_start,
+            tr_end,
+            tr_exons,
+            tr_length,
+            tr_exi,
+            tr_order,
+            tr_starts_sorted,
+            tr_end_max_sorted,
+        })
+    }
+
     /// Write `transcriptInfo.tab` into `dir`, byte-for-byte matching STAR's
     /// `GTF_transcriptGeneSJ.cpp:86-112` format:
     ///
@@ -605,6 +706,213 @@ impl TranscriptomeIndex {
 
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Loaders for STAR-compatible transcriptome index files.
+// ---------------------------------------------------------------------------
+
+fn chr_idx_for_genome_pos(genome: &Genome, pos: u64) -> Result<usize, Error> {
+    for i in 0..genome.n_chr_real {
+        let start = genome.chr_start[i];
+        let end = start + genome.chr_length[i];
+        if pos >= start && pos < end {
+            return Ok(i);
+        }
+    }
+    Err(Error::Index(format!(
+        "genome position {pos} does not fall inside any chromosome"
+    )))
+}
+
+/// Flat exon columns: `(starts_transcript_relative, ends_transcript_relative_inclusive, ex_len_cum)`.
+type ExonInfoColumns = (Vec<u64>, Vec<u64>, Vec<u32>);
+
+/// Gene table columns: `(gene_ids, gene_names, gene_biotypes)`.
+type GeneInfoColumns = (Vec<String>, Vec<String>, Vec<String>);
+
+type TrInfoColumns = (
+    Vec<String>, // tr_ids
+    Vec<u64>,    // tr_start (0-based absolute)
+    Vec<u64>,    // tr_end   (0-based exclusive, converted from STAR's inclusive)
+    Vec<u8>,     // tr_strand
+    Vec<u32>,    // tr_exn
+    Vec<u32>,    // tr_exi
+    Vec<u32>,    // tr_gene_idx
+);
+
+/// Read `transcriptInfo.tab` back into column vectors. Converts STAR's
+/// 0-based-inclusive `trEnd` to ruSTAR's 0-based-exclusive convention.
+/// Ignores the `trEmax` column (reconstructed from `tr_end` + sort order).
+fn read_transcript_info(path: &Path) -> Result<TrInfoColumns, Error> {
+    let body = std::fs::read_to_string(path).map_err(|e| Error::io(e, path))?;
+    let mut lines = body.lines();
+
+    let header = lines
+        .next()
+        .ok_or_else(|| Error::Index(format!("{}: missing header line", path.display())))?;
+    let n_tr: usize = header
+        .trim()
+        .parse()
+        .map_err(|_| Error::Index(format!("{}: header is not an integer", path.display())))?;
+
+    let mut tr_ids = Vec::with_capacity(n_tr);
+    let mut tr_start = Vec::with_capacity(n_tr);
+    let mut tr_end = Vec::with_capacity(n_tr);
+    let mut tr_strand = Vec::with_capacity(n_tr);
+    let mut tr_exn = Vec::with_capacity(n_tr);
+    let mut tr_exi = Vec::with_capacity(n_tr);
+    let mut tr_gene_idx = Vec::with_capacity(n_tr);
+
+    for (row, line) in lines.enumerate() {
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() != 8 {
+            return Err(Error::Index(format!(
+                "{}: row {} has {} fields, expected 8",
+                path.display(),
+                row + 1,
+                fields.len()
+            )));
+        }
+        let parse_u64 = |s: &str, col: &str| -> Result<u64, Error> {
+            s.parse().map_err(|_| {
+                Error::Index(format!(
+                    "{}: row {} column {} not an integer: '{}'",
+                    path.display(),
+                    row + 1,
+                    col,
+                    s
+                ))
+            })
+        };
+        tr_ids.push(fields[0].to_string());
+        tr_start.push(parse_u64(fields[1], "trStart")?);
+        // STAR's trEnd is 0-based INCLUSIVE; ruSTAR stores exclusive.
+        tr_end.push(parse_u64(fields[2], "trEnd")? + 1);
+        tr_strand.push(parse_u64(fields[4], "trStrand")? as u8);
+        tr_exn.push(parse_u64(fields[5], "trExN")? as u32);
+        tr_exi.push(parse_u64(fields[6], "trExI")? as u32);
+        tr_gene_idx.push(parse_u64(fields[7], "trGene")? as u32);
+    }
+
+    if tr_ids.len() != n_tr {
+        return Err(Error::Index(format!(
+            "{}: header says {} transcripts but found {}",
+            path.display(),
+            n_tr,
+            tr_ids.len()
+        )));
+    }
+
+    Ok((
+        tr_ids,
+        tr_start,
+        tr_end,
+        tr_strand,
+        tr_exn,
+        tr_exi,
+        tr_gene_idx,
+    ))
+}
+
+/// Read `exonInfo.tab` into flat arrays. Start/end are transcript-relative,
+/// 0-based; exEnd is INCLUSIVE (STAR's convention).
+fn read_exon_info(path: &Path) -> Result<ExonInfoColumns, Error> {
+    let body = std::fs::read_to_string(path).map_err(|e| Error::io(e, path))?;
+    let mut lines = body.lines();
+
+    let header = lines
+        .next()
+        .ok_or_else(|| Error::Index(format!("{}: missing header line", path.display())))?;
+    let n_ex: usize = header
+        .trim()
+        .parse()
+        .map_err(|_| Error::Index(format!("{}: header is not an integer", path.display())))?;
+
+    let mut starts = Vec::with_capacity(n_ex);
+    let mut ends = Vec::with_capacity(n_ex);
+    let mut len_cums = Vec::with_capacity(n_ex);
+
+    for (row, line) in lines.enumerate() {
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() != 3 {
+            return Err(Error::Index(format!(
+                "{}: row {} has {} fields, expected 3",
+                path.display(),
+                row + 1,
+                fields.len()
+            )));
+        }
+        let parse = |s: &str, col: &str| -> Result<u64, Error> {
+            s.parse().map_err(|_| {
+                Error::Index(format!(
+                    "{}: row {} column {} not an integer: '{}'",
+                    path.display(),
+                    row + 1,
+                    col,
+                    s
+                ))
+            })
+        };
+        starts.push(parse(fields[0], "exStart")?);
+        ends.push(parse(fields[1], "exEnd")?);
+        len_cums.push(parse(fields[2], "exLenCum")? as u32);
+    }
+
+    if starts.len() != n_ex {
+        return Err(Error::Index(format!(
+            "{}: header says {} exons but found {}",
+            path.display(),
+            n_ex,
+            starts.len()
+        )));
+    }
+
+    Ok((starts, ends, len_cums))
+}
+
+/// Read `geneInfo.tab`. Each record: geneID \t geneName \t geneBiotype.
+fn read_gene_info(path: &Path) -> Result<GeneInfoColumns, Error> {
+    let body = std::fs::read_to_string(path).map_err(|e| Error::io(e, path))?;
+    let mut lines = body.lines();
+
+    let header = lines
+        .next()
+        .ok_or_else(|| Error::Index(format!("{}: missing header line", path.display())))?;
+    let n_ge: usize = header
+        .trim()
+        .parse()
+        .map_err(|_| Error::Index(format!("{}: header is not an integer", path.display())))?;
+
+    let mut ids = Vec::with_capacity(n_ge);
+    let mut names = Vec::with_capacity(n_ge);
+    let mut biotypes = Vec::with_capacity(n_ge);
+
+    for (row, line) in lines.enumerate() {
+        let fields: Vec<&str> = line.splitn(3, '\t').collect();
+        if fields.len() != 3 {
+            return Err(Error::Index(format!(
+                "{}: row {} has {} fields, expected 3",
+                path.display(),
+                row + 1,
+                fields.len()
+            )));
+        }
+        ids.push(fields[0].to_string());
+        names.push(fields[1].to_string());
+        biotypes.push(fields[2].to_string());
+    }
+
+    if ids.len() != n_ge {
+        return Err(Error::Index(format!(
+            "{}: header says {} genes but found {}",
+            path.display(),
+            n_ge,
+            ids.len()
+        )));
+    }
+
+    Ok((ids, names, biotypes))
 }
 
 // ---------------------------------------------------------------------------
@@ -1302,6 +1610,78 @@ mod tests {
              T_big\t300\t699\t199\t1\t1\t1\t0\n\
              T_mid\t800\t899\t699\t1\t1\t2\t0\n"
         );
+    }
+
+    #[test]
+    fn roundtrip_write_then_load_matches_in_memory_index() {
+        let genome = make_genome();
+        let exons = vec![
+            make_exon_with_attrs(
+                "chr1",
+                101,
+                200,
+                '+',
+                "T1",
+                &[
+                    ("gene_id", "G1"),
+                    ("gene_name", "GENE1"),
+                    ("gene_biotype", "protein_coding"),
+                ],
+            ),
+            make_exon_with_attrs("chr1", 301, 400, '+', "T1", &[("gene_id", "G1")]),
+            make_exon_with_attrs(
+                "chr1",
+                601,
+                700,
+                '-',
+                "T2",
+                &[("gene_id", "G2"), ("gene_name", "GENE2")],
+            ),
+        ];
+        let built = TranscriptomeIndex::from_gtf_exons(&exons, &genome).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        built.write_transcript_info(dir.path()).unwrap();
+        built.write_exon_info(dir.path()).unwrap();
+        built.write_gene_info(dir.path()).unwrap();
+
+        let loaded = TranscriptomeIndex::from_index_dir(dir.path(), &genome).unwrap();
+
+        // Same transcripts, same exon structure. After load the order is
+        // sorted (which equals insertion order here — starts are distinct).
+        assert_eq!(loaded.tr_ids, built.tr_ids);
+        assert_eq!(loaded.tr_start, built.tr_start);
+        assert_eq!(loaded.tr_end, built.tr_end);
+        assert_eq!(loaded.tr_strand, built.tr_strand);
+        assert_eq!(loaded.tr_gene_idx, built.tr_gene_idx);
+        assert_eq!(loaded.tr_chr_idx, built.tr_chr_idx);
+        assert_eq!(loaded.tr_length, built.tr_length);
+        assert_eq!(loaded.tr_exons, built.tr_exons);
+        assert_eq!(loaded.gene_ids, built.gene_ids);
+        assert_eq!(loaded.gene_names, built.gene_names);
+        assert_eq!(loaded.gene_biotypes, built.gene_biotypes);
+    }
+
+    #[test]
+    fn load_handles_empty_gene_name_and_biotype() {
+        let genome = make_genome();
+        let exons = vec![make_exon_with_attrs(
+            "chr1",
+            101,
+            200,
+            '+',
+            "T1",
+            &[("gene_id", "G1")],
+        )];
+        let built = TranscriptomeIndex::from_gtf_exons(&exons, &genome).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        built.write_transcript_info(dir.path()).unwrap();
+        built.write_exon_info(dir.path()).unwrap();
+        built.write_gene_info(dir.path()).unwrap();
+
+        let loaded = TranscriptomeIndex::from_index_dir(dir.path(), &genome).unwrap();
+        assert_eq!(loaded.gene_names, vec!["".to_string()]);
+        assert_eq!(loaded.gene_biotypes, vec!["".to_string()]);
     }
 
     #[test]
