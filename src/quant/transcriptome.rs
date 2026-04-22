@@ -11,6 +11,8 @@
 //! the fly from the input GTF instead of loading persisted
 //! `transcriptInfo.tab`/`exonInfo.tab` files.
 use std::collections::HashMap;
+use std::io::Write as _;
+use std::path::Path;
 
 use crate::align::transcript::{CigarOp, Exon, Transcript};
 use crate::error::Error;
@@ -345,6 +347,62 @@ impl TranscriptomeIndex {
     /// Number of transcripts indexed.
     pub fn n_transcripts(&self) -> usize {
         self.tr_ids.len()
+    }
+
+    /// Write `transcriptInfo.tab` into `dir`, byte-for-byte matching STAR's
+    /// `GTF_transcriptGeneSJ.cpp:86-112` format:
+    ///
+    /// - Header line: integer transcript count.
+    /// - Per-transcript line (in sorted order by `(tr_start, tr_end)`):
+    ///   `trID\ttrStart\ttrEnd\ttrEmax\ttrStrand\ttrExN\ttrExI\ttrGene\n`
+    ///
+    /// `trStart` / `trEnd` are 0-based absolute genome coordinates
+    /// (STAR's `exonLoci` convention: chrStart + 1-based GTF pos − 1),
+    /// with `trEnd` INCLUSIVE (last base of transcript). `trEmax` is the
+    /// running max of prior transcripts' `trEnd` in sorted order — with
+    /// the initial value set to the first sorted transcript's `trEnd`
+    /// (so sorted position 0 has `trEmax == trEnd`, matching STAR's
+    /// `trend=extrLoci[GTF_extrTrEnd(0)]` initializer). `trStrand` uses
+    /// STAR's GTF.cpp encoding: `+`→1, `-`→2, other→0.
+    pub fn write_transcript_info(&self, dir: &Path) -> Result<(), Error> {
+        let path = dir.join("transcriptInfo.tab");
+        let file = std::fs::File::create(&path).map_err(|e| Error::io(e, &path))?;
+        let mut out = std::io::BufWriter::new(file);
+
+        let n_tr = self.tr_ids.len();
+        writeln!(out, "{n_tr}").map_err(|e| Error::io(e, &path))?;
+
+        let first_end_inclusive = self.tr_order.first().map(|&i| self.tr_end_inclusive(i));
+        let mut tr_emax = first_end_inclusive.unwrap_or(0);
+
+        for &i in &self.tr_order {
+            let tr_end_incl = self.tr_end_inclusive(i);
+            let tr_exn = self.tr_exons[i].len();
+            writeln!(
+                out,
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                self.tr_ids[i],
+                self.tr_start[i],
+                tr_end_incl,
+                tr_emax,
+                self.tr_strand[i],
+                tr_exn,
+                self.tr_exi[i],
+                self.tr_gene_idx[i],
+            )
+            .map_err(|e| Error::io(e, &path))?;
+
+            // Running-max update matches STAR's `trend=max(trend, ...)`
+            // that runs AFTER the write.
+            tr_emax = tr_emax.max(tr_end_incl);
+        }
+
+        Ok(())
+    }
+
+    /// 0-based inclusive end of transcript `i` — STAR's `exE` convention.
+    fn tr_end_inclusive(&self, i: usize) -> u64 {
+        self.tr_end[i].saturating_sub(1)
     }
 }
 
@@ -969,6 +1027,80 @@ mod tests {
             vec!["protein_coding".to_string(), "".to_string()]
         );
         assert_eq!(idx.tr_gene_idx, vec![0, 0, 1]);
+    }
+
+    #[test]
+    fn transcript_info_tab_byte_format() {
+        let genome = make_genome();
+        // Two non-overlapping transcripts, T1 before T2. Same gene G1.
+        // T1: chr1 [100..200) forward, 1 exon of length 100. End inclusive = 199.
+        // T2: chr1 [300..500) forward, 1 exon of length 200. End inclusive = 499.
+        let exons = vec![
+            make_exon_with_attrs("chr1", 101, 200, '+', "T1", &[("gene_id", "G1")]),
+            make_exon_with_attrs("chr1", 301, 500, '+', "T2", &[("gene_id", "G1")]),
+        ];
+        let idx = TranscriptomeIndex::from_gtf_exons(&exons, &genome).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        idx.write_transcript_info(dir.path()).unwrap();
+
+        let body = std::fs::read_to_string(dir.path().join("transcriptInfo.tab")).unwrap();
+        // Header + two records.
+        // Format: trID \t trStart \t trEnd(incl) \t trEmax \t trStrand \t trExN \t trExI \t trGene
+        // Sorted position 0 (T1): trEnd = 199, trEmax = 199 (initial = first end).
+        // Sorted position 1 (T2): trEnd = 499, trEmax = 199 (running max excludes current).
+        assert_eq!(
+            body,
+            "2\n\
+             T1\t100\t199\t199\t1\t1\t0\t0\n\
+             T2\t300\t499\t199\t1\t1\t1\t0\n"
+        );
+    }
+
+    #[test]
+    fn transcript_info_tab_reverse_strand() {
+        let genome = make_genome();
+        let exons = vec![make_exon_with_attrs(
+            "chr1",
+            101,
+            200,
+            '-',
+            "T1",
+            &[("gene_id", "G1")],
+        )];
+        let idx = TranscriptomeIndex::from_gtf_exons(&exons, &genome).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        idx.write_transcript_info(dir.path()).unwrap();
+        let body = std::fs::read_to_string(dir.path().join("transcriptInfo.tab")).unwrap();
+        // Reverse strand in STAR's GTF.cpp encoding = 2.
+        assert_eq!(body, "1\nT1\t100\t199\t199\t2\t1\t0\t0\n");
+    }
+
+    #[test]
+    fn transcript_info_tab_emax_running_max_excludes_current() {
+        let genome = make_genome();
+        // Three transcripts ordered by sort: T_small (end 199), T_big (end 699), T_mid (end 499).
+        // Sort by (trStart, trEnd) on different start positions so order is
+        // deterministic by start alone.
+        let exons = vec![
+            make_exon_with_attrs("chr1", 101, 200, '+', "T_small", &[("gene_id", "G1")]),
+            make_exon_with_attrs("chr1", 301, 700, '+', "T_big", &[("gene_id", "G1")]),
+            make_exon_with_attrs("chr1", 801, 900, '+', "T_mid", &[("gene_id", "G1")]),
+        ];
+        let idx = TranscriptomeIndex::from_gtf_exons(&exons, &genome).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        idx.write_transcript_info(dir.path()).unwrap();
+        let body = std::fs::read_to_string(dir.path().join("transcriptInfo.tab")).unwrap();
+        // Sorted-order emax values:
+        //   pos 0 (T_small, end 199): emax = 199 (initial = first end)
+        //   pos 1 (T_big, end 699):   emax = 199 (running max of {T_small})
+        //   pos 2 (T_mid, end 899):   emax = 699 (running max of {T_small, T_big})
+        assert_eq!(
+            body,
+            "3\n\
+             T_small\t100\t199\t199\t1\t1\t0\t0\n\
+             T_big\t300\t699\t199\t1\t1\t1\t0\n\
+             T_mid\t800\t899\t699\t1\t1\t2\t0\n"
+        );
     }
 
     #[test]
