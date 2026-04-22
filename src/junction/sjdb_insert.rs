@@ -13,8 +13,13 @@
 //! base suffix array has been built.
 
 use crate::align::score::detect_splice_motif;
+use crate::error::Error;
 use crate::genome::Genome;
 use crate::junction::encode_motif;
+
+/// STAR's inter-SJ spacer byte in the Gsj buffer (same value STAR uses
+/// for inter-chromosome padding — `IncludeDefine.h::GENOME_spacingChar`).
+const GSJ_SPACING: u8 = 5;
 
 /// Compute STAR's `(sjdbShiftLeft, sjdbShiftRight)` for an intron whose
 /// 0-based donor/acceptor positions are `s` and `e`.
@@ -202,10 +207,7 @@ pub fn sort_and_dedup(mut junctions: Vec<PreparedJunction>) -> Vec<PreparedJunct
 /// existing entry but force its strand to 0 in-place (handled by the
 /// caller via a special-case — represented here as returning a cloned
 /// `old` with strand=0).
-fn merge_cross_strand(
-    old: &PreparedJunction,
-    new: &PreparedJunction,
-) -> Option<PreparedJunction> {
+fn merge_cross_strand(old: &PreparedJunction, new: &PreparedJunction) -> Option<PreparedJunction> {
     // Strand 0 = undefined.
     if old.strand > 0 && new.strand == 0 {
         return None; // keep old
@@ -235,6 +237,62 @@ fn merge_cross_strand(
     } else {
         Some(new.clone())
     }
+}
+
+/// Build the Gsj buffer — the concatenated splice-junction flanking
+/// sequences STAR appends to the Genome binary at `genomeGenerate`.
+///
+/// Each junction contributes exactly `2 * sjdb_overhang + 1` bytes:
+/// `sjdb_overhang` donor-side bases (from the genome position
+/// `original_start - sjdb_overhang`), `sjdb_overhang` acceptor-side
+/// bases (from `original_end + 1`), and one `GSJ_SPACING` spacer byte
+/// at the end. Matches `sjdbPrepare.cpp:203-215`.
+///
+/// Callers supply junctions in sorted/deduplicated order (via
+/// [`sort_and_dedup`]). `genome` is read through
+/// `Genome::sequence[..n_genome_real]`.
+pub fn build_gsj(
+    junctions: &[PreparedJunction],
+    genome: &Genome,
+    n_genome_real: u64,
+    sjdb_overhang: u32,
+) -> Result<Vec<u8>, Error> {
+    let overhang = sjdb_overhang as usize;
+    let sjdb_length = 2 * overhang + 1;
+    let forward = &genome.sequence[..n_genome_real as usize];
+    let mut gsj = vec![GSJ_SPACING; junctions.len() * sjdb_length];
+
+    for (i, pj) in junctions.iter().enumerate() {
+        let donor_start = pj
+            .original_start()
+            .checked_sub(overhang as u64)
+            .ok_or_else(|| sjdb_bounds_err(pj, overhang, "donor underflows"))?;
+        let acceptor_start = pj.original_end() + 1;
+
+        let d0 = donor_start as usize;
+        let a0 = acceptor_start as usize;
+        if d0 + overhang > forward.len() || a0 + overhang > forward.len() {
+            return Err(sjdb_bounds_err(pj, overhang, "flank overruns genome"));
+        }
+
+        let base = i * sjdb_length;
+        gsj[base..base + overhang].copy_from_slice(&forward[d0..d0 + overhang]);
+        gsj[base + overhang..base + 2 * overhang].copy_from_slice(&forward[a0..a0 + overhang]);
+        // base + 2*overhang = trailing spacer, already initialized.
+    }
+
+    Ok(gsj)
+}
+
+fn sjdb_bounds_err(pj: &PreparedJunction, overhang: usize, reason: &str) -> Error {
+    Error::Index(format!(
+        "sjdb flanking window ({} bp overhang) {} for junction at original coords {}..{} on chr {}",
+        overhang,
+        reason,
+        pj.original_start(),
+        pj.original_end(),
+        pj.chr_idx,
+    ))
 }
 
 #[cfg(test)]
@@ -471,6 +529,113 @@ mod tests {
         let out = sort_and_dedup(vec![noncan, canon.clone()]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0], canon);
+    }
+
+    #[test]
+    fn build_gsj_canonical_no_shift() {
+        // Single canonical junction at original [100..200] with 3bp overhang.
+        // Donor bytes = forward[97..100] (3 bytes), acceptor bytes =
+        // forward[201..204] (3 bytes), then 1 spacer.
+        let mut f = vec![4u8; 300];
+        // Overhang-donor region: 97,98,99 = 0,1,2 (A,C,G)
+        f[97] = 0;
+        f[98] = 1;
+        f[99] = 2;
+        // Intron body filled with noise (irrelevant)
+        f[100] = 2; // GT
+        f[101] = 3;
+        f[199] = 0; // AG
+        f[200] = 2;
+        // Acceptor-flank bytes: 201,202,203 = 3,0,1 (T,A,C)
+        f[201] = 3;
+        f[202] = 0;
+        f[203] = 1;
+        let g = make_test_genome(f);
+        let junction = pj(0, 100, 200, 1, 0, 1);
+        let gsj = build_gsj(&[junction], &g, g.n_genome, 3).unwrap();
+        assert_eq!(gsj, vec![0, 1, 2, 3, 0, 1, GSJ_SPACING]);
+    }
+
+    #[test]
+    fn build_gsj_noncanonical_reverts_shift_for_extraction() {
+        // Non-canonical junction whose STORED coords sit 2bp left of
+        // the ORIGINAL. Flank extraction must use ORIGINAL (the
+        // `original_start()` / `original_end()` helpers) so the same
+        // bytes land in Gsj regardless of motif type.
+        let mut f = vec![4u8; 300];
+        f[98] = 0; // original_start - overhang = 102 - 4 = 98
+        f[99] = 1;
+        f[100] = 2;
+        f[101] = 3;
+        // intron garbage at 102..=199
+        f[200] = 2;
+        f[201] = 3;
+        f[202] = 0;
+        f[203] = 1;
+        let g = make_test_genome(f);
+        // start_pos/end_pos are SHIFTED (stored form for motif==0).
+        // With shift_left=2, original_start = 102, original_end = 199.
+        let junction = pj(0, 100, 197, 0, 2, 0);
+        let gsj = build_gsj(&[junction], &g, g.n_genome, 4).unwrap();
+        // Donor: forward[98..102] = [0,1,2,3]
+        // Acceptor: forward[200..204] = [2,3,0,1]
+        assert_eq!(gsj, vec![0, 1, 2, 3, 2, 3, 0, 1, GSJ_SPACING]);
+    }
+
+    #[test]
+    fn build_gsj_multiple_junctions_concatenate() {
+        let mut f = vec![4u8; 400];
+        // Junction A: canonical at [100..200], overhang 2 → donor
+        // bytes 98,99; acceptor 201,202.
+        f[98] = 0;
+        f[99] = 0;
+        f[201] = 3;
+        f[202] = 3;
+        // Junction B: canonical at [300..350], overhang 2 → donor
+        // bytes 298,299; acceptor 351,352.
+        f[298] = 1;
+        f[299] = 1;
+        f[351] = 2;
+        f[352] = 2;
+        let g = make_test_genome(f);
+        let a = pj(0, 100, 200, 1, 0, 1);
+        let b = pj(0, 300, 350, 1, 0, 1);
+        let gsj = build_gsj(&[a, b], &g, g.n_genome, 2).unwrap();
+        // sjdb_length = 5 (2 donor + 2 acceptor + 1 spacer) per junction.
+        assert_eq!(
+            gsj,
+            vec![
+                0,
+                0,
+                3,
+                3,
+                GSJ_SPACING, // junction A
+                1,
+                1,
+                2,
+                2,
+                GSJ_SPACING, // junction B
+            ]
+        );
+    }
+
+    #[test]
+    fn build_gsj_errors_when_flank_underflows() {
+        // Junction too close to the left edge → donor_start underflows.
+        let g = make_test_genome(vec![0u8; 300]);
+        let bad = pj(0, 3, 200, 1, 0, 1); // original_start=3; overhang 10 underflows
+        let err = build_gsj(&[bad], &g, g.n_genome, 10).unwrap_err();
+        assert!(format!("{}", err).contains("underflows"));
+    }
+
+    #[test]
+    fn build_gsj_errors_when_flank_overruns_genome() {
+        // Acceptor overruns the right edge.
+        let g = make_test_genome(vec![0u8; 300]);
+        // original_end = 295, overhang = 10 → acceptor region [296..306), exceeds n_genome=300.
+        let bad = pj(0, 100, 295, 1, 0, 1);
+        let err = build_gsj(&[bad], &g, g.n_genome, 10).unwrap_err();
+        assert!(format!("{}", err).contains("overruns"));
     }
 
     #[test]
