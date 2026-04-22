@@ -20,6 +20,16 @@ use crate::genome::Genome;
 use crate::junction::gtf::GtfRecord;
 use crate::params::Parameters;
 
+/// GTF attribute names the transcriptome index reads.
+const GTF_ATTR_TRANSCRIPT_ID: &str = "transcript_id";
+const GTF_ATTR_GENE_ID: &str = "gene_id";
+const GTF_ATTR_GENE_NAME: &str = "gene_name";
+const GTF_ATTR_GENE_BIOTYPE: &str = "gene_biotype";
+
+/// STAR's fallback for GTF records missing `gene_biotype`
+/// (`source/GTF.cpp`).
+const MISSING_GENE_TYPE: &str = "MissingGeneType";
+
 // ---------------------------------------------------------------------------
 // Filter-mode enum + softclip extension (subtask 3)
 // ---------------------------------------------------------------------------
@@ -148,7 +158,7 @@ impl TranscriptomeIndex {
         let mut order: Vec<String> = Vec::new();
         let mut groups: HashMap<String, Vec<&GtfRecord>> = HashMap::new();
         for rec in exons {
-            let tid = match rec.attributes.get("transcript_id") {
+            let tid = match rec.attributes.get(GTF_ATTR_TRANSCRIPT_ID) {
                 Some(id) => id.clone(),
                 None => continue,
             };
@@ -258,21 +268,24 @@ impl TranscriptomeIndex {
                 _ => 1u8, // unknown → treat as forward (STAR default)
             };
 
-            let gene_id = first.attributes.get("gene_id").cloned().unwrap_or_default();
+            let gene_id = first
+                .attributes
+                .get(GTF_ATTR_GENE_ID)
+                .cloned()
+                .unwrap_or_default();
             // STAR-faithful fallbacks: when the GTF record omits gene_name,
             // STAR's GTF.cpp writes geneAttr[ig][0] = gene_id (not empty).
-            // When gene_biotype is omitted, it writes the literal string
-            // "MissingGeneType".
+            // When gene_biotype is omitted, it writes `MISSING_GENE_TYPE`.
             let gene_name = first
                 .attributes
-                .get("gene_name")
+                .get(GTF_ATTR_GENE_NAME)
                 .cloned()
                 .unwrap_or_else(|| gene_id.clone());
             let gene_biotype = first
                 .attributes
-                .get("gene_biotype")
+                .get(GTF_ATTR_GENE_BIOTYPE)
                 .cloned()
-                .unwrap_or_else(|| "MissingGeneType".to_string());
+                .unwrap_or_else(|| MISSING_GENE_TYPE.to_string());
 
             // Intern the gene — first transcript for each gene_id wins the
             // name/biotype slot. Subsequent transcripts with a richer name or
