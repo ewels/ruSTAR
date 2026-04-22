@@ -110,9 +110,12 @@ pub struct TranscriptomeIndex {
     pub tr_gene_idx: Vec<u32>,
     /// Unique gene IDs in first-seen order (STAR's `geneInfo.tab` column 1).
     pub gene_ids: Vec<String>,
-    /// gene_name per gene (empty string if the GTF record had no `gene_name`).
+    /// gene_name per gene. Falls back to the `gene_id` string when the GTF
+    /// has no `gene_name` attribute — matches STAR's `GTF.cpp` behavior.
     pub gene_names: Vec<String>,
-    /// gene_biotype per gene (empty if absent).
+    /// gene_biotype per gene. Falls back to the literal string
+    /// `"MissingGeneType"` when the GTF has no `gene_biotype` attribute —
+    /// matches STAR's `GTF.cpp` behavior for `geneAttr[ig][1]`.
     pub gene_biotypes: Vec<String>,
     /// Absolute genome start of the first exon (0-based).
     pub tr_start: Vec<u64>,
@@ -256,16 +259,20 @@ impl TranscriptomeIndex {
             };
 
             let gene_id = first.attributes.get("gene_id").cloned().unwrap_or_default();
+            // STAR-faithful fallbacks: when the GTF record omits gene_name,
+            // STAR's GTF.cpp writes geneAttr[ig][0] = gene_id (not empty).
+            // When gene_biotype is omitted, it writes the literal string
+            // "MissingGeneType".
             let gene_name = first
                 .attributes
                 .get("gene_name")
                 .cloned()
-                .unwrap_or_default();
+                .unwrap_or_else(|| gene_id.clone());
             let gene_biotype = first
                 .attributes
                 .get("gene_biotype")
                 .cloned()
-                .unwrap_or_default();
+                .unwrap_or_else(|| "MissingGeneType".to_string());
 
             // Intern the gene — first transcript for each gene_id wins the
             // name/biotype slot. Subsequent transcripts with a richer name or
@@ -1546,9 +1553,14 @@ mod tests {
             idx.gene_names,
             vec!["GENE1".to_string(), "GENE2".to_string()]
         );
+        // G2 has no gene_biotype attribute — STAR-faithful fallback is
+        // the literal "MissingGeneType".
         assert_eq!(
             idx.gene_biotypes,
-            vec!["protein_coding".to_string(), "".to_string()]
+            vec![
+                "protein_coding".to_string(),
+                "MissingGeneType".to_string()
+            ]
         );
         assert_eq!(idx.tr_gene_idx, vec![0, 0, 1]);
     }
@@ -1695,8 +1707,9 @@ mod tests {
         built.write_gene_info(dir.path()).unwrap();
 
         let loaded = TranscriptomeIndex::from_index_dir(dir.path(), &genome).unwrap();
-        assert_eq!(loaded.gene_names, vec!["".to_string()]);
-        assert_eq!(loaded.gene_biotypes, vec!["".to_string()]);
+        // STAR fallbacks: gene_name → gene_id, gene_biotype → "MissingGeneType".
+        assert_eq!(loaded.gene_names, vec!["G1".to_string()]);
+        assert_eq!(loaded.gene_biotypes, vec!["MissingGeneType".to_string()]);
     }
 
     #[test]
@@ -1821,12 +1834,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         idx.write_gene_info(dir.path()).unwrap();
         let body = std::fs::read_to_string(dir.path().join("geneInfo.tab")).unwrap();
+        // STAR-faithful fallbacks: missing gene_name → gene_id string,
+        // missing gene_biotype → literal "MissingGeneType".
         assert_eq!(
             body,
             "3\n\
              G1\tGENE1\tprotein_coding\n\
-             G2\tGENE2\t\n\
-             G3\t\t\n"
+             G2\tGENE2\tMissingGeneType\n\
+             G3\tG3\tMissingGeneType\n"
         );
     }
 

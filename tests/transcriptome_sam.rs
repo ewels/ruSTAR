@@ -101,14 +101,15 @@ fn assert_star_transcriptome_files(genome_dir: &std::path::Path) {
         "exonInfo.tab byte format divergent from STAR"
     );
 
-    // geneInfo.tab: header = 2, gene IDs in first-seen order with empty
-    // name/biotype columns (GTF had no gene_name / gene_biotype attrs).
+    // geneInfo.tab: header = 2, gene IDs in first-seen order. STAR falls
+    // back to gene_id for missing gene_name, and the literal string
+    // "MissingGeneType" for missing gene_biotype.
     let ge_info = fs::read_to_string(genome_dir.join("geneInfo.tab")).unwrap();
     assert_eq!(
         ge_info,
         "2\n\
-         G1\t\t\n\
-         G2\t\t\n",
+         G1\tG1\tMissingGeneType\n\
+         G2\tG2\tMissingGeneType\n",
         "geneInfo.tab byte format divergent from STAR"
     );
 
