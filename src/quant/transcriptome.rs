@@ -1006,6 +1006,14 @@ fn align_to_one_transcript(
         let block_start = block.genome_start;
         let block_end = block.genome_end; // half-open exclusive
 
+        // Mate boundary (STAR canonSJ == -3): the previous block and this
+        // block belong to different mates. The next block may sit in any
+        // transcript exon — re-locate `ex` via the binary-search helper.
+        let crossed_mate_boundary = iab > 0 && align.exons[iab - 1].i_frag != block.i_frag;
+        if crossed_mate_boundary {
+            ex = find_containing_exon(tr_exons, block_start)?;
+        }
+
         // Block must not extend past the current transcript exon's end.
         if block_end > tr_exons[ex].genome_end {
             return None;
@@ -1014,9 +1022,10 @@ fn align_to_one_transcript(
             return None;
         }
 
-        // STAR starts a new projected exon on the first block or after a
-        // preceding canonSJ junction (>= 0); insertions coalesce.
-        let start_new = iab == 0 || is_splice_boundary_before(align, iab);
+        // STAR starts a new projected exon on the first block, after a
+        // preceding canonSJ junction (>= 0), or at a mate boundary;
+        // insertions coalesce into the previous block.
+        let start_new = iab == 0 || crossed_mate_boundary || is_splice_boundary_before(align, iab);
 
         if start_new {
             // t-space position = ex_len_cum + (block_start - exon_start)
@@ -1042,8 +1051,13 @@ fn align_to_one_transcript(
             }
         }
 
-        // Advance `ex` across any splice boundary BEFORE the next block.
-        if iab + 1 < align.exons.len() && is_splice_boundary_before(align, iab + 1) {
+        // Advance `ex` across any splice boundary BEFORE the next block,
+        // but only when both blocks belong to the same mate (mate boundaries
+        // are handled above at the start of the next iteration).
+        if iab + 1 < align.exons.len()
+            && align.exons[iab + 1].i_frag == block.i_frag
+            && is_splice_boundary_before(align, iab + 1)
+        {
             // Require the junction to match a transcript junction.
             let next_block = &align.exons[iab + 1];
             if ex + 1 >= tr_exons.len() {
