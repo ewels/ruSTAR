@@ -405,6 +405,56 @@ impl TranscriptomeIndex {
         self.tr_end[i].saturating_sub(1)
     }
 
+    /// Write `exonGeTrInfo.tab` into `dir`, byte-for-byte matching STAR's
+    /// `GTF_transcriptGeneSJ.cpp:33-53` format:
+    ///
+    /// - Header: total exon count.
+    /// - Per-exon line: `exStart\texEnd\texStrand\tgeID\ttrID\n`
+    ///
+    /// Coordinates are 0-based absolute with `exEnd` INCLUSIVE (STAR's
+    /// `exE`). Exons are sorted by `(exStart, exEnd, exStrand, geID, trID)`
+    /// — STAR's `funCompareArrays<uint64,5>` order.
+    ///
+    /// Note: STAR writes the insertion-order transcript index here, not the
+    /// sorted one. Its own comment at line 51 calls this "wrong" because
+    /// transcripts are re-sorted in `transcriptInfo.tab`. For byte parity
+    /// we replicate the behavior.
+    pub fn write_exon_ge_tr_info(&self, dir: &Path) -> Result<(), Error> {
+        let path = dir.join("exonGeTrInfo.tab");
+        let file = std::fs::File::create(&path).map_err(|e| Error::io(e, &path))?;
+        let mut out = std::io::BufWriter::new(file);
+
+        // Flatten (exStart, exEnd_inclusive, strand, gene_idx, tr_insertion_idx).
+        let mut records: Vec<(u64, u64, u8, u32, u32)> =
+            Vec::with_capacity(self.tr_exons.iter().map(|e| e.len()).sum());
+        for (tr_idx, exs) in self.tr_exons.iter().enumerate() {
+            let strand = self.tr_strand[tr_idx];
+            let gene_idx = self.tr_gene_idx[tr_idx];
+            for ex in exs {
+                records.push((
+                    ex.genome_start,
+                    ex.genome_end.saturating_sub(1),
+                    strand,
+                    gene_idx,
+                    tr_idx as u32,
+                ));
+            }
+        }
+        records.sort_unstable();
+
+        writeln!(out, "{}", records.len()).map_err(|e| Error::io(e, &path))?;
+        for (ex_start, ex_end, strand, gene_idx, tr_idx) in records {
+            writeln!(
+                out,
+                "{}\t{}\t{}\t{}\t{}",
+                ex_start, ex_end, strand, gene_idx, tr_idx
+            )
+            .map_err(|e| Error::io(e, &path))?;
+        }
+
+        Ok(())
+    }
+
     /// Write `geneInfo.tab` into `dir`, byte-for-byte matching STAR's
     /// `GTF_transcriptGeneSJ.cpp:55-60` format:
     ///
@@ -1159,6 +1209,37 @@ mod tests {
              T_small\t100\t199\t199\t1\t1\t0\t0\n\
              T_big\t300\t699\t199\t1\t1\t1\t0\n\
              T_mid\t800\t899\t699\t1\t1\t2\t0\n"
+        );
+    }
+
+    #[test]
+    fn exon_ge_tr_info_tab_byte_format() {
+        let genome = make_genome();
+        // T1 (insertion 0): forward strand, 2 exons at [100,200) and [300,400).
+        // T2 (insertion 1): reverse strand, 1 exon at [150,250).
+        // T3 (insertion 2): forward, 1 exon at [100,200) — overlaps T1's first exon.
+        // Sort by (start, end, strand, gene, trIdx):
+        //   (100, 199, 1, 0, 0) — T1's exon 1
+        //   (100, 199, 1, 2, 2) — T3 (same start/end/strand, different gene)
+        //   (150, 249, 2, 1, 1) — T2
+        //   (300, 399, 1, 0, 0) — T1's exon 2
+        let exons = vec![
+            make_exon_with_attrs("chr1", 101, 200, '+', "T1", &[("gene_id", "G1")]),
+            make_exon_with_attrs("chr1", 301, 400, '+', "T1", &[("gene_id", "G1")]),
+            make_exon_with_attrs("chr1", 151, 250, '-', "T2", &[("gene_id", "G2")]),
+            make_exon_with_attrs("chr1", 101, 200, '+', "T3", &[("gene_id", "G3")]),
+        ];
+        let idx = TranscriptomeIndex::from_gtf_exons(&exons, &genome).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        idx.write_exon_ge_tr_info(dir.path()).unwrap();
+        let body = std::fs::read_to_string(dir.path().join("exonGeTrInfo.tab")).unwrap();
+        assert_eq!(
+            body,
+            "4\n\
+             100\t199\t1\t0\t0\n\
+             100\t199\t1\t2\t2\n\
+             150\t249\t2\t1\t1\n\
+             300\t399\t1\t0\t0\n"
         );
     }
 
