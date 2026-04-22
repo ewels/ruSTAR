@@ -12,92 +12,40 @@
 //! The module is orchestrated from `index::GenomeIndex::build` after the
 //! base suffix array has been built.
 
-/// STAR's `sjdbMotif` encoding (see `source/sjdbPrepare.cpp:37-50`).
-///
-/// `0` = non-canonical / unknown.
-/// Values 1-6 correspond to: GT/AG(+), CT/AC(-), GC/AG(+), CT/GC(-),
-/// AT/AC(+), GT/AT(-), where each pair is the dinucleotide at the donor /
-/// acceptor side of the intron (base-encoded A=0, C=1, G=2, T=3).
-pub const MOTIF_NON_CANONICAL: u8 = 0;
-pub const MOTIF_GT_AG: u8 = 1;
-pub const MOTIF_CT_AC: u8 = 2;
-pub const MOTIF_GC_AG: u8 = 3;
-pub const MOTIF_CT_GC: u8 = 4;
-pub const MOTIF_AT_AC: u8 = 5;
-pub const MOTIF_GT_AT: u8 = 6;
-
-/// Classify the splice motif at an intron's donor/acceptor boundary.
-///
-/// `s` is the 0-based genome-absolute position of the intron's FIRST base
-/// (the base immediately after the donor exon's last base). `e` is the
-/// 0-based position of the intron's LAST base (immediately before the
-/// acceptor exon's first base). Both must be valid indices into `genome`.
-///
-/// Returns one of the `MOTIF_*` constants.
-pub fn classify_motif(genome: &[u8], s: u64, e: u64) -> u8 {
-    let si = s as usize;
-    let ei = e as usize;
-    if ei + 1 > genome.len() || si + 1 >= genome.len() {
-        return MOTIF_NON_CANONICAL;
-    }
-    let b0 = genome[si]; // intron first base
-    let b1 = genome[si + 1];
-    let b2 = genome[ei - 1];
-    let b3 = genome[ei];
-
-    match (b0, b1, b2, b3) {
-        (2, 3, 0, 2) => MOTIF_GT_AG,
-        (1, 3, 0, 1) => MOTIF_CT_AC,
-        (2, 1, 0, 2) => MOTIF_GC_AG,
-        (1, 3, 2, 1) => MOTIF_CT_GC,
-        (0, 3, 0, 1) => MOTIF_AT_AC,
-        (2, 3, 0, 3) => MOTIF_GT_AT,
-        _ => MOTIF_NON_CANONICAL,
-    }
-}
+use crate::align::score::detect_splice_motif;
+use crate::genome::Genome;
+use crate::junction::encode_motif;
 
 /// Compute STAR's `(sjdbShiftLeft, sjdbShiftRight)` for an intron whose
 /// 0-based donor/acceptor positions are `s` and `e`.
 ///
 /// STAR defines these as the number of bases the intron boundary can shift
-/// left / right while preserving the donor/acceptor base identity (i.e. the
-/// "repeat" length across the junction), capped at 255 per
-/// `sjdbPrepare.cpp:52-73`.
+/// left / right while preserving the donor/acceptor base identity
+/// (`sjdbPrepare.cpp:52-73`) — i.e. the repeat length across the junction.
+/// Intended to land the junction at its left-most canonical position so
+/// identical splice events produce identical SA indices regardless of
+/// which exon pair they came from.
 ///
-/// Stops at genome bounds, on any `N` (base code ≥ 4), or when the count
-/// reaches 255. Returns `(shift_left, shift_right)` both in `0..=255`.
-pub fn compute_shifts(genome: &[u8], s: u64, e: u64, n_genome_real: u64) -> (u8, u8) {
+/// Stops at genome bounds, on any N-base (code ≥ 4), or at the 255 cap.
+pub fn compute_shifts(genome: &Genome, s: u64, e: u64, n_genome_real: u64) -> (u8, u8) {
+    let forward = &genome.sequence[..n_genome_real as usize];
     let si = s as usize;
     let ei = e as usize;
-    let ng = n_genome_real as usize;
 
-    // Left shift: keep moving left while G[s-1-jjL] == G[e-jjL] and both
-    // bases are A/C/G/T (< 4).
     let mut jj_l: u8 = 0;
-    while (jj_l as usize) < si && jj_l < 255 && ei >= jj_l as usize {
-        let a_idx = si - 1 - jj_l as usize;
-        let b_idx = ei - jj_l as usize;
-        if a_idx >= genome.len() || b_idx >= genome.len() {
-            break;
-        }
-        let a = genome[a_idx];
-        let b = genome[b_idx];
+    while jj_l < 255 && (jj_l as usize) < si && ei >= jj_l as usize {
+        let a = forward[si - 1 - jj_l as usize];
+        let b = forward[ei - jj_l as usize];
         if a != b || a >= 4 {
             break;
         }
         jj_l += 1;
     }
 
-    // Right shift: keep moving right while G[s+jjR] == G[e+1+jjR] (< 4).
     let mut jj_r: u8 = 0;
-    while (si + jj_r as usize) < ng && jj_r < 255 {
-        let a_idx = si + jj_r as usize;
-        let b_idx = ei + 1 + jj_r as usize;
-        if a_idx >= genome.len() || b_idx >= genome.len() {
-            break;
-        }
-        let a = genome[a_idx];
-        let b = genome[b_idx];
+    while jj_r < 255 && (ei + 1 + jj_r as usize) < forward.len() {
+        let a = forward[si + jj_r as usize];
+        let b = forward[ei + 1 + jj_r as usize];
         if a != b || a >= 4 {
             break;
         }
@@ -130,48 +78,33 @@ pub struct PreparedJunction {
     pub strand: u8,
 }
 
-/// Convert a splice-junction database entry (as stored in
-/// `SpliceJunctionDb`) to a fully-prepared entry carrying motif, shifts,
-/// strand, and shift-adjusted coordinates.
+/// Convert a splice-junction database entry to a fully-prepared entry
+/// carrying motif, shifts, strand, and shift-adjusted coordinates.
 ///
-/// - `chr_idx`, `intron_start`, `intron_end` are ruSTAR's 0-based absolute
-///   genome coordinates for the first/last bases of the intron.
-/// - `db_strand` is the strand as provided by the GTF / db
-///   (0 = unknown, 1 = +, 2 = -). If `0` and the motif encodes a strand,
-///   STAR picks the strand from the motif
-///   (`sjdbPrepare.cpp:184-188`: `2 - motif % 2`).
-/// - `genome` is the forward-strand genome byte slice
-///   (`Genome::sequence[..n_genome]`).
-/// - `n_genome_real` is the padded-but-without-sjdb genome length,
-///   matching STAR's `mapGen.nGenomeReal`.
+/// `db_strand` is STAR's 0/1/2 (unknown/+/-); when it's 0 and the motif
+/// is canonical, STAR derives the strand from the motif via
+/// `2 - motif % 2` (see `sjdbPrepare.cpp:184-188`).
 pub fn prepare_junction(
     chr_idx: usize,
     intron_start: u64,
     intron_end: u64,
     db_strand: u8,
-    genome: &[u8],
+    genome: &Genome,
     n_genome_real: u64,
 ) -> PreparedJunction {
-    let motif = classify_motif(genome, intron_start, intron_end);
+    let intron_len = (intron_end - intron_start + 1) as u32;
+    let motif = encode_motif(detect_splice_motif(intron_start, intron_len, genome));
     let (shift_left, shift_right) = compute_shifts(genome, intron_start, intron_end, n_genome_real);
 
-    // STAR's sjdbPrepare.cpp:71-72: after computing shifts, subtract
-    // shift_left from both start and end to put the junction at its
-    // canonical (left-most) representation.
+    // sjdbPrepare.cpp:71-72 — land the junction at its left-most canonical
+    // representation so identical splice events produce identical indices.
     let shifted_start = intron_start - shift_left as u64;
     let shifted_end = intron_end - shift_left as u64;
 
     let strand = match db_strand {
         1 | 2 => db_strand,
-        _ => {
-            // Unknown db strand: derive from motif (STAR sjdbPrepare.cpp:184-188).
-            // `2 - motif % 2` maps 1/3/5 → 1 (+), 2/4/6 → 2 (-).
-            if motif == MOTIF_NON_CANONICAL {
-                0
-            } else {
-                2 - (motif % 2)
-            }
-        }
+        _ if motif == 0 => 0,
+        _ => 2 - (motif % 2), // 1/3/5 → 1 (+), 2/4/6 → 2 (-)
     };
 
     PreparedJunction {
@@ -189,169 +122,107 @@ pub fn prepare_junction(
 mod tests {
     use super::*;
 
-    // Build a helper genome buffer. Positions beyond the written slice
-    // default to the placeholder padding byte (5) so motif checks at edges
-    // are exercised safely.
-    fn make_genome(bases: &[(usize, u8)]) -> Vec<u8> {
-        let max_idx = bases.iter().map(|(i, _)| *i).max().unwrap_or(0);
-        let mut g = vec![5u8; max_idx + 10];
-        for (i, b) in bases {
-            g[*i] = *b;
+    // Build a single-chromosome Genome from a forward-strand byte slice.
+    // Callers who only exercise compute_shifts / prepare_junction don't
+    // need a valid reverse complement; we fill the RC half with padding.
+    fn make_test_genome(forward: Vec<u8>) -> Genome {
+        let n = forward.len() as u64;
+        let mut seq = vec![5u8; (n * 2) as usize];
+        seq[..forward.len()].copy_from_slice(&forward);
+        Genome {
+            sequence: seq,
+            n_genome: n,
+            n_chr_real: 1,
+            chr_name: vec!["chr1".to_string()],
+            chr_length: vec![n],
+            chr_start: vec![0, n],
         }
-        g
-    }
-
-    #[test]
-    fn classify_gt_ag_forward() {
-        // S..E intron = G T ... A G → motif 1
-        let g = make_genome(&[(100, 2), (101, 3), (199, 0), (200, 2)]);
-        assert_eq!(classify_motif(&g, 100, 200), MOTIF_GT_AG);
-    }
-
-    #[test]
-    fn classify_ct_ac_reverse() {
-        // C T ... A C → motif 2
-        let g = make_genome(&[(100, 1), (101, 3), (199, 0), (200, 1)]);
-        assert_eq!(classify_motif(&g, 100, 200), MOTIF_CT_AC);
-    }
-
-    #[test]
-    fn classify_gc_ag() {
-        let g = make_genome(&[(100, 2), (101, 1), (199, 0), (200, 2)]);
-        assert_eq!(classify_motif(&g, 100, 200), MOTIF_GC_AG);
-    }
-
-    #[test]
-    fn classify_ct_gc() {
-        let g = make_genome(&[(100, 1), (101, 3), (199, 2), (200, 1)]);
-        assert_eq!(classify_motif(&g, 100, 200), MOTIF_CT_GC);
-    }
-
-    #[test]
-    fn classify_at_ac() {
-        let g = make_genome(&[(100, 0), (101, 3), (199, 0), (200, 1)]);
-        assert_eq!(classify_motif(&g, 100, 200), MOTIF_AT_AC);
-    }
-
-    #[test]
-    fn classify_gt_at() {
-        let g = make_genome(&[(100, 2), (101, 3), (199, 0), (200, 3)]);
-        assert_eq!(classify_motif(&g, 100, 200), MOTIF_GT_AT);
-    }
-
-    #[test]
-    fn classify_non_canonical() {
-        // Non-matching combination → 0
-        let g = make_genome(&[(100, 0), (101, 0), (199, 0), (200, 0)]);
-        assert_eq!(classify_motif(&g, 100, 200), MOTIF_NON_CANONICAL);
-    }
-
-    #[test]
-    fn classify_out_of_bounds() {
-        let g = vec![5u8; 10];
-        assert_eq!(classify_motif(&g, 100, 200), MOTIF_NON_CANONICAL);
-    }
-
-    fn g_with(bases: &[u8]) -> Vec<u8> {
-        // Place `bases` starting at index 100 in a large buffer so the
-        // left/right scans have room to run; positions outside get 4 (N)
-        // so they break the scan loop naturally.
-        let mut g = vec![4u8; 300];
-        for (i, b) in bases.iter().enumerate() {
-            g[100 + i] = *b;
-        }
-        g
     }
 
     #[test]
     fn shifts_no_repeat() {
-        // donor side ...GTAG... acceptor — no base match around boundaries.
-        // Encoded: A=0 C=1 G=2 T=3. Intron [105,205): GT...AG.
-        // Around boundaries: exon1 ends with "A" (0), intron starts with "G" (2), etc.
-        let mut g = g_with(&[]);
-        g[100] = 0; // donor exon tail
-        g[101] = 1;
-        g[102] = 0;
-        g[103] = 1;
-        g[104] = 0;
-        // intron
-        g[105] = 2; // G
-        g[106] = 3; // T
-        g[203] = 0; // A
-        g[204] = 2; // G
-        // acceptor exon head
-        g[205] = 3;
-        g[206] = 2;
-        g[207] = 3;
-        g[208] = 2;
-        g[209] = 3;
-        let (l, r) = compute_shifts(&g, 105, 204, 300);
+        let mut f = vec![4u8; 300];
+        f[100] = 0;
+        f[101] = 1;
+        f[102] = 0;
+        f[103] = 1;
+        f[104] = 0;
+        f[105] = 2; // intron start
+        f[106] = 3;
+        f[203] = 0;
+        f[204] = 2; // intron end
+        f[205] = 3;
+        f[206] = 2;
+        f[207] = 3;
+        f[208] = 2;
+        f[209] = 3;
+        let g = make_test_genome(f);
+        let (l, r) = compute_shifts(&g, 105, 204, g.n_genome);
         assert_eq!(l, 0);
         assert_eq!(r, 0);
     }
 
     #[test]
     fn shifts_with_repeat_on_left() {
-        // Construct a junction where the last base of the donor exon equals
-        // the last base of the intron — shifting left by 1 preserves motif.
-        // Intron [105, 205). G[104] = X == G[204]; G[103] = Y == G[203].
-        let mut g = g_with(&[]);
-        // exon1 tail: ... A C
-        g[103] = 0; // A
-        g[104] = 1; // C
-        // intron: G T ... A C (so G[104]=C==G[204], G[103]=A==G[203])
-        g[105] = 2;
-        g[106] = 3;
-        g[203] = 0; // A (matches g[103])
-        g[204] = 1; // C (matches g[104])
-        // exon2 head
-        g[205] = 3;
-        let (l, _r) = compute_shifts(&g, 105, 204, 300);
+        let mut f = vec![4u8; 300];
+        f[103] = 0;
+        f[104] = 1;
+        f[105] = 2;
+        f[106] = 3;
+        f[203] = 0;
+        f[204] = 1;
+        f[205] = 3;
+        let g = make_test_genome(f);
+        let (l, _r) = compute_shifts(&g, 105, 204, g.n_genome);
         assert_eq!(l, 2);
     }
 
     #[test]
     fn shifts_with_repeat_on_right() {
-        // STAR check: G[s + jjR] == G[e + 1 + jjR]. So the "first intron
-        // base" must equal the "first post-acceptor base". Here s=105,
-        // e=204: G[105]==G[205], G[106]==G[206], then the third base
-        // differs and the scan stops — shift_right == 2.
-        let mut g = g_with(&[]);
-        g[105] = 2; // G: intron first base
-        g[106] = 3; // T
-        g[107] = 0; // A  (will differ from g[207])
-        g[204] = 1; // C: intron last base
-        g[205] = 2; // G  (matches g[105])
-        g[206] = 3; // T  (matches g[106])
-        g[207] = 1; // C  (does NOT match g[107])
-        let (_l, r) = compute_shifts(&g, 105, 204, 300);
+        let mut f = vec![4u8; 300];
+        f[105] = 2;
+        f[106] = 3;
+        f[107] = 0;
+        f[204] = 1;
+        f[205] = 2;
+        f[206] = 3;
+        f[207] = 1;
+        let g = make_test_genome(f);
+        let (_l, r) = compute_shifts(&g, 105, 204, g.n_genome);
         assert_eq!(r, 2);
     }
 
     #[test]
     fn shifts_cap_at_255() {
-        // Uniform A genome large enough that both scans can run past 255.
-        // Scan bounds: left ≤ si; right ≤ genome.len() - (ei + 1).
-        // Pick si/ei to leave > 255 bases on each side.
-        let g = vec![0u8; 2000];
-        let (l, r) = compute_shifts(&g, 500, 1000, 2000);
+        let g = make_test_genome(vec![0u8; 2000]);
+        let (l, r) = compute_shifts(&g, 500, 1000, g.n_genome);
         assert_eq!(l, 255);
         assert_eq!(r, 255);
     }
 
     #[test]
+    fn shifts_stop_at_n_base() {
+        let mut f = vec![0u8; 300];
+        f[100] = 4;
+        let g = make_test_genome(f);
+        let (l, _) = compute_shifts(&g, 150, 249, g.n_genome);
+        assert_eq!(l, 49);
+    }
+
+    #[test]
     fn prepare_gt_ag_forward_no_repeat() {
-        let mut g = vec![4u8; 400]; // start with N
-        g[100] = 0;
-        g[101] = 0; // exon1 tail
-        g[102] = 2; // G: intron start
-        g[103] = 3; // T
-        g[198] = 0; // A
-        g[199] = 2; // G: intron end
-        g[200] = 1;
-        g[201] = 1;
-        let pj = prepare_junction(0, 102, 199, 1, &g, 400);
-        assert_eq!(pj.motif, MOTIF_GT_AG);
+        let mut f = vec![4u8; 400];
+        f[100] = 0;
+        f[101] = 0;
+        f[102] = 2; // G
+        f[103] = 3; // T
+        f[198] = 0; // A
+        f[199] = 2; // G
+        f[200] = 1;
+        f[201] = 1;
+        let g = make_test_genome(f);
+        let pj = prepare_junction(0, 102, 199, 1, &g, g.n_genome);
+        assert_eq!(pj.motif, 1); // GT/AG
         assert_eq!(pj.shift_left, 0);
         assert_eq!(pj.shift_right, 0);
         assert_eq!(pj.start_pos, 102);
@@ -362,57 +233,48 @@ mod tests {
     #[test]
     fn prepare_dot_strand_derived_from_motif() {
         // Non-canonical motif with db_strand=0 → strand 0.
-        let g = vec![0u8; 300];
-        let pj = prepare_junction(0, 100, 200, 0, &g, 300);
-        assert_eq!(pj.motif, MOTIF_NON_CANONICAL);
+        let g = make_test_genome(vec![0u8; 300]);
+        let pj = prepare_junction(0, 100, 200, 0, &g, g.n_genome);
+        assert_eq!(pj.motif, 0);
         assert_eq!(pj.strand, 0);
 
-        // GT/AG motif with db_strand=0 → strand derived = 1 (+).
-        let mut g = vec![4u8; 300];
-        g[100] = 2;
-        g[101] = 3;
-        g[199] = 0;
-        g[200] = 2;
-        let pj = prepare_junction(0, 100, 200, 0, &g, 300);
-        assert_eq!(pj.motif, MOTIF_GT_AG);
+        // GT/AG motif (forward) with db_strand=0 → strand 1.
+        let mut f = vec![4u8; 300];
+        f[100] = 2;
+        f[101] = 3;
+        f[199] = 0;
+        f[200] = 2;
+        let g = make_test_genome(f);
+        let pj = prepare_junction(0, 100, 200, 0, &g, g.n_genome);
+        assert_eq!(pj.motif, 1);
         assert_eq!(pj.strand, 1);
 
-        // CT/AC motif with db_strand=0 → strand = 2 (-).
-        let mut g = vec![4u8; 300];
-        g[100] = 1;
-        g[101] = 3;
-        g[199] = 0;
-        g[200] = 1;
-        let pj = prepare_junction(0, 100, 200, 0, &g, 300);
-        assert_eq!(pj.motif, MOTIF_CT_AC);
+        // CT/AC motif (reverse) with db_strand=0 → strand 2.
+        let mut f = vec![4u8; 300];
+        f[100] = 1;
+        f[101] = 3;
+        f[199] = 0;
+        f[200] = 1;
+        let g = make_test_genome(f);
+        let pj = prepare_junction(0, 100, 200, 0, &g, g.n_genome);
+        assert_eq!(pj.motif, 2);
         assert_eq!(pj.strand, 2);
     }
 
     #[test]
     fn prepare_shift_left_applied_to_coords() {
-        // Construct: one base of repeat to the left of the junction so
-        // shift_left = 1. Confirm start/end decrement by 1.
-        let mut g = vec![4u8; 400];
-        g[102] = 2; // G
-        g[103] = 3; // T
-        g[198] = 0; // A
-        g[199] = 2; // G
-        // Put identical 'G' at 101 and 199 so shift_left = 1.
-        g[101] = 2;
-        // Put different base at 100 to stop the scan.
-        g[100] = 3;
-        let pj = prepare_junction(0, 102, 199, 1, &g, 400);
+        // One base of repeat to the left → shift_left=1, coords decrement by 1.
+        let mut f = vec![4u8; 400];
+        f[102] = 2;
+        f[103] = 3;
+        f[198] = 0;
+        f[199] = 2;
+        f[101] = 2; // repeat
+        f[100] = 3; // break
+        let g = make_test_genome(f);
+        let pj = prepare_junction(0, 102, 199, 1, &g, g.n_genome);
         assert_eq!(pj.shift_left, 1);
         assert_eq!(pj.start_pos, 101);
         assert_eq!(pj.end_pos, 198);
-    }
-
-    #[test]
-    fn shifts_stop_at_n_base() {
-        let mut g = vec![0u8; 300];
-        // Intron [150, 250). Shift left should stop at N in the scan.
-        g[100] = 4; // N: breaks left scan here
-        let (l, _) = compute_shifts(&g, 150, 249, 300);
-        assert_eq!(l, 49); // scanned 49 A's before hitting N at g[100]
     }
 }
