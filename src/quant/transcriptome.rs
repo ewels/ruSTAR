@@ -409,14 +409,19 @@ impl TranscriptomeIndex {
             tr_length.push(total);
         }
 
-        // Derive tr_chr_idx from each transcript's first exon genome_start.
+        // Derive tr_chr_idx from each transcript's first exon genome_start
+        // using the existing `Genome::position_to_chr` binary-search helper.
         let mut tr_chr_idx: Vec<usize> = Vec::with_capacity(n_tr);
         for exs in &tr_exons {
             let pos = exs
                 .first()
                 .map(|e| e.genome_start)
                 .ok_or_else(|| Error::Index("transcript with zero exons".into()))?;
-            let chr_idx = chr_idx_for_genome_pos(genome, pos)?;
+            let (chr_idx, _) = genome.position_to_chr(pos).ok_or_else(|| {
+                Error::Index(format!(
+                    "transcript first-exon position {pos} does not fall inside any chromosome"
+                ))
+            })?;
             tr_chr_idx.push(chr_idx);
         }
 
@@ -718,19 +723,6 @@ impl TranscriptomeIndex {
 // ---------------------------------------------------------------------------
 // Loaders for STAR-compatible transcriptome index files.
 // ---------------------------------------------------------------------------
-
-fn chr_idx_for_genome_pos(genome: &Genome, pos: u64) -> Result<usize, Error> {
-    for i in 0..genome.n_chr_real {
-        let start = genome.chr_start[i];
-        let end = start + genome.chr_length[i];
-        if pos >= start && pos < end {
-            return Ok(i);
-        }
-    }
-    Err(Error::Index(format!(
-        "genome position {pos} does not fall inside any chromosome"
-    )))
-}
 
 /// Flat exon columns: `(starts_transcript_relative, ends_transcript_relative_inclusive, ex_len_cum)`.
 type ExonInfoColumns = (Vec<u64>, Vec<u64>, Vec<u32>);
