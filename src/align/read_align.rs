@@ -798,8 +798,7 @@ pub fn align_paired_read(
 
                     let combined_span =
                         t1.genome_end.max(t2.genome_end) - t1.genome_start.min(t2.genome_start);
-                    let combined_score_override =
-                        Some(wt.score + scorer.genomic_length_penalty(combined_span));
+                    let combined_wt_score = wt.score + scorer.genomic_length_penalty(combined_span);
 
                     if let Some(pair) = try_pair_transcripts(
                         &t1,
@@ -808,8 +807,7 @@ pub fn align_paired_read(
                         len2,
                         params,
                         combined_score_threshold,
-                        &scorer,
-                        combined_score_override,
+                        combined_wt_score,
                     ) {
                         joint_pairs.push(pair);
                     }
@@ -1021,19 +1019,17 @@ pub fn align_paired_read(
     }
 
     // Half-mapped fallback: report the best-scoring single-mate transcript.
-    // STAR applies quality filter to the COMBINED read (Lread-1 = len1+len2), so use the
-    // same combined_score_threshold here. This matches STAR's behavior where a single-mate
-    // alignment that falls below the combined threshold is not output at all.
-    let thresh1 = combined_score_threshold.max(params.out_filter_score_min);
-    let thresh2 = combined_score_threshold.max(params.out_filter_score_min);
+    // STAR applies the quality filter to the COMBINED read (Lread-1 = len1+len2), so we
+    // use the same threshold for each mate here.
+    let single_mate_threshold = combined_score_threshold.max(params.out_filter_score_min);
 
     let best_m1 = single_mate1_transcripts
         .into_iter()
-        .filter(|t| t.score >= thresh1)
+        .filter(|t| t.score >= single_mate_threshold)
         .max_by_key(|t| t.score);
     let best_m2 = single_mate2_transcripts
         .into_iter()
-        .filter(|t| t.score >= thresh2)
+        .filter(|t| t.score >= single_mate_threshold)
         .max_by_key(|t| t.score);
 
     match (best_m1, best_m2) {
@@ -1091,8 +1087,7 @@ fn try_pair_transcripts(
     len2: usize,
     params: &Parameters,
     combined_score_threshold: i32,
-    scorer: &AlignmentScorer,
-    combined_wt_score_override: Option<i32>,
+    combined_wt_score: i32,
 ) -> Option<PairedAlignment> {
     // Must be same chromosome
     if t1.chr_idx != t2.chr_idx {
@@ -1126,20 +1121,6 @@ fn try_pair_transcripts(
     if span > max_span {
         return None;
     }
-
-    // Combined score: use override if provided (combined-read path supplies the original
-    // stitch_recurse score + combined-span penalty, which correctly includes mismatch
-    // penalties). Fallback formula (per-mate path) undoes per-mate span penalties and
-    // applies a single combined-span penalty.
-    let combined_span = right.genome_end - left.genome_start;
-    let combined_wt_score = combined_wt_score_override.unwrap_or_else(|| {
-        let t1_span = t1.genome_end - t1.genome_start;
-        let t2_span = t2.genome_end - t2.genome_start;
-        let p1 = scorer.genomic_length_penalty(t1_span);
-        let p2 = scorer.genomic_length_penalty(t2_span);
-        let combined_p = scorer.genomic_length_penalty(combined_span);
-        t1.score + t2.score - p1 - p2 + combined_p
-    });
 
     // SCORE-GATE: reject pairs where score is below the absolute floor
     if combined_wt_score + params.out_filter_multimap_score_range < combined_score_threshold {
