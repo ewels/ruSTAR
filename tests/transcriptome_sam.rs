@@ -71,6 +71,70 @@ fn create_fastq(dir: &TempDir, n_reads: usize, chr1_seq: &str) -> PathBuf {
     fastq_path
 }
 
+/// Confirm the 5 STAR-compatible transcriptome index files are present
+/// and structurally correct. Uses the test GTF (T1 [101,400) + /
+/// T2 [601,900), both forward, G1/G2 single-exon transcripts) to derive
+/// expected byte contents.
+fn assert_star_transcriptome_files(genome_dir: &std::path::Path) {
+    // transcriptInfo.tab: header = 2, then two lines in sorted order.
+    // T1: trStart=100, trEnd=399 (inclusive), trEmax=399 (first), strand=1 (+),
+    //     trExN=1, trExI=0, trGene=0.
+    // T2: trStart=600, trEnd=899, trEmax=399 (running max excludes current),
+    //     strand=1, trExN=1, trExI=1, trGene=1.
+    let tr_info = fs::read_to_string(genome_dir.join("transcriptInfo.tab")).unwrap();
+    assert_eq!(
+        tr_info,
+        "2\n\
+         T1\t100\t399\t399\t1\t1\t0\t0\n\
+         T2\t600\t899\t399\t1\t1\t1\t1\n",
+        "transcriptInfo.tab byte format divergent from STAR"
+    );
+
+    // exonInfo.tab: header = 2, two single-exon transcripts with relative
+    // [0, len-1] coords and exLenCum=0 for each first exon.
+    let ex_info = fs::read_to_string(genome_dir.join("exonInfo.tab")).unwrap();
+    assert_eq!(
+        ex_info,
+        "2\n\
+         0\t299\t0\n\
+         0\t299\t0\n",
+        "exonInfo.tab byte format divergent from STAR"
+    );
+
+    // geneInfo.tab: header = 2, gene IDs in first-seen order with empty
+    // name/biotype columns (GTF had no gene_name / gene_biotype attrs).
+    let ge_info = fs::read_to_string(genome_dir.join("geneInfo.tab")).unwrap();
+    assert_eq!(
+        ge_info,
+        "2\n\
+         G1\t\t\n\
+         G2\t\t\n",
+        "geneInfo.tab byte format divergent from STAR"
+    );
+
+    // exonGeTrInfo.tab: header = 2, exons sorted by (start, end, strand, ...).
+    // Both are forward (+strand == 1).
+    let ge_tr_info = fs::read_to_string(genome_dir.join("exonGeTrInfo.tab")).unwrap();
+    assert_eq!(
+        ge_tr_info,
+        "2\n\
+         100\t399\t1\t0\t0\n\
+         600\t899\t1\t1\t1\n",
+        "exonGeTrInfo.tab byte format divergent from STAR"
+    );
+
+    // sjdbList.fromGTF.out.tab: both transcripts are single-exon, so no
+    // splice junctions are produced. File must exist but be empty.
+    let sj_path = genome_dir.join("sjdbList.fromGTF.out.tab");
+    assert!(sj_path.exists(), "sjdbList.fromGTF.out.tab was not written");
+    let sj = fs::read_to_string(&sj_path).unwrap();
+    assert!(
+        sj.is_empty(),
+        "single-exon-only transcripts should yield empty sjdbList.fromGTF.out.tab, got: {:?}",
+        sj
+    );
+}
+
 #[test]
 fn transcriptome_sam_end_to_end_smoke_test() {
     let tmpdir = TempDir::new().unwrap();
@@ -87,7 +151,8 @@ fn transcriptome_sam_end_to_end_smoke_test() {
     // also handles the trailing slash convention.
     let output_prefix = format!("{}/", output_dir.display());
 
-    // Build genome index.
+    // Build genome index, passing the GTF so transcriptInfo.tab + friends
+    // are persisted (matches STAR's workflow).
     Command::cargo_bin("ruSTAR")
         .unwrap()
         .args([
@@ -97,6 +162,8 @@ fn transcriptome_sam_end_to_end_smoke_test() {
             genome_dir.to_str().unwrap(),
             "--genomeFastaFiles",
             fasta_path.to_str().unwrap(),
+            "--sjdbGTFfile",
+            gtf_path.to_str().unwrap(),
             "--genomeSAindexNbases",
             "5",
         ])
@@ -131,6 +198,11 @@ fn transcriptome_sam_end_to_end_smoke_test() {
         ])
         .assert()
         .success();
+
+    // All 5 STAR-compatible transcriptome index files must be written at
+    // genomeGenerate time. Verify their byte formats match STAR exactly
+    // (see src/quant/transcriptome.rs::write_*).
+    assert_star_transcriptome_files(&genome_dir);
 
     // The transcriptome BAM must exist.
     let tr_bam = output_dir.join("Aligned.toTranscriptome.out.bam");
