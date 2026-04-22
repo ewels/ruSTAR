@@ -10,6 +10,7 @@ use crate::error::Error;
 use crate::genome::Genome;
 use crate::junction::SpliceJunctionDb;
 use crate::params::Parameters;
+use crate::quant::transcriptome::TranscriptomeIndex;
 use sa_index::SaIndex;
 use suffix_array::SuffixArray;
 
@@ -20,6 +21,11 @@ pub struct GenomeIndex {
     pub suffix_array: SuffixArray,
     pub sa_index: SaIndex,
     pub junction_db: SpliceJunctionDb,
+    /// Populated when the index was built with a GTF (`--sjdbGTFfile`).
+    /// Mirrors STAR's `Transcriptome` object and is written to disk as
+    /// `transcriptInfo.tab` + friends at `genomeGenerate`, reloaded at
+    /// `alignReads` from the same files.
+    pub transcriptome: Option<TranscriptomeIndex>,
 }
 
 impl GenomeIndex {
@@ -48,12 +54,22 @@ impl GenomeIndex {
             sa_index.data.len()
         );
 
-        // Load GTF annotations if provided
-        let junction_db = if let Some(ref gtf_path) = params.sjdb_gtf_file {
-            SpliceJunctionDb::from_gtf(gtf_path, &genome)?
+        // Load GTF annotations if provided.  This parses the GTF once and
+        // shares the result between the junction database and the
+        // transcriptome index so we don't pay the cost twice.
+        let (junction_db, transcriptome) = if let Some(ref gtf_path) = params.sjdb_gtf_file {
+            let jdb = SpliceJunctionDb::from_gtf(gtf_path, &genome)?;
+            let exons = crate::junction::gtf::parse_gtf(gtf_path)?;
+            let tr = TranscriptomeIndex::from_gtf_exons(&exons, &genome)?;
+            log::info!(
+                "Transcriptome index built from GTF: {} transcripts, {} genes",
+                tr.n_transcripts(),
+                tr.gene_ids.len()
+            );
+            (jdb, Some(tr))
         } else {
             log::info!("No GTF file provided, all junctions will be novel");
-            SpliceJunctionDb::empty()
+            (SpliceJunctionDb::empty(), None)
         };
 
         log::info!(
@@ -66,6 +82,7 @@ impl GenomeIndex {
             suffix_array,
             sa_index,
             junction_db,
+            transcriptome,
         })
     }
 
@@ -134,6 +151,21 @@ impl GenomeIndex {
 
         fs::write(&genome_params_path, updated_content)
             .map_err(|e| Error::io(e, &genome_params_path))?;
+
+        // Write transcriptome index files (STAR-compatible) when the GTF
+        // was supplied. Matches STAR's `GTF_transcriptGeneSJ.cpp` outputs.
+        if let Some(tr) = &self.transcriptome {
+            tr.write_transcript_info(dir)?;
+            tr.write_exon_info(dir)?;
+            tr.write_gene_info(dir)?;
+            tr.write_exon_ge_tr_info(dir)?;
+            tr.write_sjdb_list_from_gtf(dir, &self.genome)?;
+            log::info!(
+                "Wrote transcriptome index files: {} transcripts, {} genes",
+                tr.n_transcripts(),
+                tr.gene_ids.len()
+            );
+        }
 
         Ok(())
     }

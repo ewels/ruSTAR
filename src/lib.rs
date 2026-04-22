@@ -154,26 +154,27 @@ fn align_reads(params: &Parameters) -> anyhow::Result<()> {
             None
         };
 
-    // Build transcriptome index for --quantMode TranscriptomeSAM (Salmon/RSEM input).
-    let tr_idx: Option<std::sync::Arc<crate::quant::transcriptome::TranscriptomeIndex>> = if params
-        .quant_transcriptome_sam()
-    {
-        let gtf_path = params.sjdb_gtf_file.as_ref().unwrap();
-        info!(
-            "quantMode TranscriptomeSAM: building transcriptome index from {}",
-            gtf_path.display()
-        );
-        let exons = crate::junction::gtf::parse_gtf(gtf_path)?;
-        let tidx =
-            crate::quant::transcriptome::TranscriptomeIndex::from_gtf_exons(&exons, &index.genome)?;
-        info!(
-            "Loaded {} transcripts for TranscriptomeSAM output",
-            tidx.n_transcripts()
-        );
-        Some(std::sync::Arc::new(tidx))
-    } else {
-        None
-    };
+    // Use the transcriptome index loaded alongside the genome (populated
+    // from transcriptInfo.tab / exonInfo.tab / geneInfo.tab at load time
+    // — see GenomeIndex::load). Only wire it through to the pipeline when
+    // `--quantMode TranscriptomeSAM` is requested.
+    let tr_idx: Option<std::sync::Arc<crate::quant::transcriptome::TranscriptomeIndex>> =
+        if params.quant_transcriptome_sam() {
+            let tr = index.transcriptome.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--quantMode TranscriptomeSAM requires a GTF-aware index; \
+                     re-run genomeGenerate with --sjdbGTFfile or pass --sjdbGTFfile \
+                     at alignReads so transcriptInfo.tab can be (re)built"
+                )
+            })?;
+            info!(
+                "quantMode TranscriptomeSAM: using {} transcripts from genome index",
+                tr.n_transcripts()
+            );
+            Some(std::sync::Arc::new(tr.clone()))
+        } else {
+            None
+        };
 
     let time_map_start = chrono::Local::now();
 
