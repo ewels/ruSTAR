@@ -591,29 +591,20 @@ pub fn align_paired_read(
     combined_read.extend_from_slice(&rc_mate2);
     let combined_len = combined_read.len();
 
-    // Seed each fragment with its own Nstart (STAR qualitySplit per-fragment seeding).
-    // mate1_seq fragment: seeds have read_pos in 0..len1 → no adjustment for forward seeds.
-    //   search_rc=true seeds (in RC(mate1) coords 0..len1) need +=(len2+1) for RC(combined) coords.
-    // RC(mate2_seq) fragment: search_rc=false seeds need +=(len1+1) for combined coords.
-    //   search_rc=true seeds (in mate2 coords 0..len2) need no adjustment for RC(combined) coords.
-    let mut seeds1 = Seed::find_seeds(mate1_seq, index, params.seed_map_min, params, debug_name)?;
-    for s in &mut seeds1 {
-        s.mate_id = 0;
-        if s.search_rc {
-            s.read_pos += len2 + 1;
-        }
+    // STAR-faithful combined-read seeding: seed the full combined read as one unit.
+    // PE_SPACER_BASE=11 stops MMP search at the boundary — seeds never span mates.
+    // For 301bp: Nstart=7 (301/50+1). Position 129 gives ≤21bp seeds (spacer at 150)
+    // → less likely unique for repetitive (rDNA) sequences → fewer N² cross-copy pairings.
+    let mut combined_seeds =
+        Seed::find_seeds(&combined_read, index, params.seed_map_min, params, debug_name)?;
+    // After find_seeds, ALL seeds (search_rc=false and search_rc=true) have read_pos
+    // in combined_read coordinates. The RC conversion in search_direction_sparse:
+    //   seed.read_pos = combined_len - p - L (where p is position in RC(combined_read))
+    // maps RC positions back to combined_read space. So the same boundary applies:
+    // positions 0..len1 → mate1; positions len1+1.. → RC(mate2).
+    for s in &mut combined_seeds {
+        s.mate_id = if s.read_pos < len1 { 0 } else { 1 };
     }
-
-    let mut seeds2 = Seed::find_seeds(&rc_mate2, index, params.seed_map_min, params, "")?;
-    for s in &mut seeds2 {
-        s.mate_id = 1;
-        if !s.search_rc {
-            s.read_pos += len1 + 1;
-        }
-    }
-
-    let mut combined_seeds = seeds1;
-    combined_seeds.extend(seeds2);
 
     // Cluster combined seeds using the combined read length
     let clusters = cluster_seeds(&combined_seeds, index, params, combined_len);
