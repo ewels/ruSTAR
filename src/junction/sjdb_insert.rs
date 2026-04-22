@@ -68,7 +68,7 @@ pub struct PreparedJunction {
     pub start_pos: u64,
     /// Shift-adjusted 0-based genome position of the last intron base.
     pub end_pos: u64,
-    /// STAR motif code (`MOTIF_*`).
+    /// STAR motif code (0 = non-canonical, 1-6 = canonical variants).
     pub motif: u8,
     /// Repeat length to the left of the (pre-shift) donor.
     pub shift_left: u8,
@@ -76,6 +76,40 @@ pub struct PreparedJunction {
     pub shift_right: u8,
     /// STAR strand code (0 = unknown/dot, 1 = +, 2 = -).
     pub strand: u8,
+}
+
+impl PreparedJunction {
+    /// Value STAR writes into `mapGen.sjdbStart` after its post-dedup
+    /// sort: ORIGINAL pre-shift start for canonical motifs, shifted
+    /// start for non-canonical (matches `sjdbPrepare.cpp:127,174`).
+    pub fn stored_start(&self) -> u64 {
+        if self.motif == 0 {
+            self.start_pos
+        } else {
+            self.start_pos + self.shift_left as u64
+        }
+    }
+
+    /// Companion to `stored_start` — the `mapGen.sjdbEnd` value.
+    pub fn stored_end(&self) -> u64 {
+        if self.motif == 0 {
+            self.end_pos
+        } else {
+            self.end_pos + self.shift_left as u64
+        }
+    }
+
+    /// Original (pre-shift) 0-based position of the first intron base.
+    /// Used for Gsj flanking-sequence extraction (STAR uses this regardless
+    /// of motif).
+    pub fn original_start(&self) -> u64 {
+        self.start_pos + self.shift_left as u64
+    }
+
+    /// Companion to `original_start`.
+    pub fn original_end(&self) -> u64 {
+        self.end_pos + self.shift_left as u64
+    }
 }
 
 /// Convert a splice-junction database entry to a fully-prepared entry
@@ -115,6 +149,91 @@ pub fn prepare_junction(
         shift_left,
         shift_right,
         strand,
+    }
+}
+
+/// Sort a prepared junction list into STAR's post-dedup order and apply
+/// the cross-strand deduplication that STAR does after its second sort
+/// (`sjdbPrepare.cpp:141-192`).
+///
+/// STAR's first-pass (intra-strand) dedup collapses duplicate sjdb
+/// entries from the same source at the same `(start, end, strand)`.
+/// ruSTAR's `SpliceJunctionDb` already deduplicates on that key at the
+/// HashMap level, so those first-pass branches never trigger here; the
+/// second-pass cross-strand collision dedup does.
+///
+/// Dedup rules when two surviving junctions share `(stored_start,
+/// stored_end)` but have different strand assignments:
+///
+/// - Undefined strand vs defined strand → keep the defined-strand one.
+/// - Both non-canonical → collapse to a single entry with strand = 0
+///   (undefined).
+/// - One canonical + one not → keep the canonical one.
+/// - Both canonical but on correct vs wrong strand relative to motif —
+///   keep the one whose strand matches `2 - motif % 2`.
+pub fn sort_and_dedup(mut junctions: Vec<PreparedJunction>) -> Vec<PreparedJunction> {
+    junctions.sort_by(|a, b| {
+        a.stored_start()
+            .cmp(&b.stored_start())
+            .then_with(|| a.stored_end().cmp(&b.stored_end()))
+    });
+
+    let mut out: Vec<PreparedJunction> = Vec::with_capacity(junctions.len());
+    for j in junctions {
+        match out.last() {
+            Some(last)
+                if last.stored_start() == j.stored_start()
+                    && last.stored_end() == j.stored_end() =>
+            {
+                if let Some(winner) = merge_cross_strand(last, &j) {
+                    *out.last_mut().unwrap() = winner;
+                }
+                // else: keep `last` unchanged.
+            }
+            _ => out.push(j),
+        }
+    }
+    out
+}
+
+/// Decide what `(stored_start, stored_end)` duplicate to keep.
+/// Returns `Some(new)` to replace the stored entry, `None` to keep it.
+/// For the "both non-canonical on opposite strands" case we keep the
+/// existing entry but force its strand to 0 in-place (handled by the
+/// caller via a special-case — represented here as returning a cloned
+/// `old` with strand=0).
+fn merge_cross_strand(
+    old: &PreparedJunction,
+    new: &PreparedJunction,
+) -> Option<PreparedJunction> {
+    // Strand 0 = undefined.
+    if old.strand > 0 && new.strand == 0 {
+        return None; // keep old
+    }
+    if old.strand == 0 && new.strand > 0 {
+        return Some(new.clone()); // replace
+    }
+    // Both non-canonical → collapse to undefined strand on the old one.
+    if old.motif == 0 && new.motif == 0 {
+        let mut merged = old.clone();
+        merged.strand = 0;
+        return Some(merged);
+    }
+    // One canonical, one not: prefer canonical.
+    if old.motif > 0 && new.motif == 0 {
+        return None;
+    }
+    if old.motif == 0 && new.motif > 0 {
+        return Some(new.clone());
+    }
+    // Both canonical with defined strands. Keep the one on the correct
+    // strand for its motif (2 - motif % 2). If the old one is on the
+    // correct strand, skip the new one; otherwise replace.
+    let old_expected = 2 - (old.motif % 2);
+    if old.strand == old_expected {
+        None
+    } else {
+        Some(new.clone())
     }
 }
 
@@ -276,5 +395,96 @@ mod tests {
         assert_eq!(pj.shift_left, 1);
         assert_eq!(pj.start_pos, 101);
         assert_eq!(pj.end_pos, 198);
+    }
+
+    fn pj(
+        chr_idx: usize,
+        start: u64,
+        end: u64,
+        motif: u8,
+        shift_left: u8,
+        strand: u8,
+    ) -> PreparedJunction {
+        PreparedJunction {
+            chr_idx,
+            start_pos: start,
+            end_pos: end,
+            motif,
+            shift_left,
+            shift_right: 0,
+            strand,
+        }
+    }
+
+    #[test]
+    fn stored_and_original_coords_differ_for_canonical_only() {
+        let canon = pj(0, 100, 200, 1, 3, 1);
+        // Canonical stores ORIGINAL (shifted + shift_left).
+        assert_eq!(canon.stored_start(), 103);
+        assert_eq!(canon.stored_end(), 203);
+        assert_eq!(canon.original_start(), 103);
+        assert_eq!(canon.original_end(), 203);
+
+        let noncanon = pj(0, 100, 200, 0, 3, 0);
+        // Non-canonical stores SHIFTED.
+        assert_eq!(noncanon.stored_start(), 100);
+        assert_eq!(noncanon.stored_end(), 200);
+        // original_* still recovers pre-shift coords.
+        assert_eq!(noncanon.original_start(), 103);
+        assert_eq!(noncanon.original_end(), 203);
+    }
+
+    #[test]
+    fn sort_orders_by_stored_coords() {
+        let a = pj(0, 100, 200, 1, 0, 1); // stored 100..200
+        let b = pj(0, 50, 150, 1, 0, 1); // stored 50..150
+        let c = pj(0, 80, 180, 1, 0, 1); // stored 80..180
+        let out = sort_and_dedup(vec![a.clone(), b.clone(), c.clone()]);
+        assert_eq!(out, vec![b, c, a]);
+    }
+
+    #[test]
+    fn dedup_prefers_defined_strand_over_undefined() {
+        let defined = pj(0, 100, 200, 1, 0, 1);
+        let undefined = pj(0, 100, 200, 0, 0, 0);
+        let out = sort_and_dedup(vec![defined.clone(), undefined]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0], defined);
+    }
+
+    #[test]
+    fn dedup_collapses_two_non_canonical_to_undefined_strand() {
+        // Two non-canonical at same stored coords, opposite strands → one
+        // entry with strand = 0.
+        let a = pj(0, 100, 200, 0, 0, 1);
+        let b = pj(0, 100, 200, 0, 0, 2);
+        let out = sort_and_dedup(vec![a, b]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].strand, 0);
+    }
+
+    #[test]
+    fn dedup_prefers_canonical_over_non_canonical() {
+        // Motif=1 (canonical) beats motif=0 (non) at same stored coords.
+        let canon = pj(0, 100, 200, 1, 0, 1);
+        let noncan = pj(0, 100, 200, 0, 0, 2);
+        let out = sort_and_dedup(vec![noncan, canon.clone()]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0], canon);
+    }
+
+    #[test]
+    fn dedup_prefers_strand_matching_motif() {
+        // motif=1 (GT/AG +) stored on wrong strand (2) vs a competing
+        // motif=2 (CT/AC -) on its correct strand. Same stored coords.
+        // STAR keeps the one whose strand matches `2 - motif%2`.
+        // For motif=1: expected strand = 2 - 1%2 = 1.
+        // For motif=2: expected strand = 2 - 2%2 = 2.
+        let old_wrong = pj(0, 100, 200, 1, 0, 2); // motif 1 wants strand 1, has 2
+        let new_right = pj(0, 100, 200, 2, 0, 2); // motif 2 wants strand 2, has 2
+        let out = sort_and_dedup(vec![old_wrong, new_right.clone()]);
+        assert_eq!(out.len(), 1);
+        // `old_wrong` is on wrong strand for its motif — STAR replaces.
+        assert_eq!(out[0], new_right);
     }
 }
