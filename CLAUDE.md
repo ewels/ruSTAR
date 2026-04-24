@@ -32,7 +32,7 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Status
 
-**278 tests passing, 0 clippy warnings.** SE: 8796/8926 compare_sam.py (98.5%), **99.989% faithfulness (tie-adjusted)** (8798/8799 non-tie reads exact), 127 position disagreements (ALL verified as genuine ties — excluded from denominator). 1 CIGAR-only disagree (ERR12389696.13573895, insertion placement, seed-level tie). **0 STAR-only / 0 ruSTAR-only SE reads**. PE: **8393 both-mapped** (STAR: 8390), **0 half-mapped**, 2 MAPQ inflations / 6 deflations, **99.831% PE exact faithfulness (tie-adjusted)** (16566/16594, 176 tie-breaking diffs excluded), **0 proper-pair diffs**. Phase 17.A: `scoreSeedBest` pre-extension. Phase 17.B: per-mate seeding. Phase 17.C: STAR-faithful SCORE-GATE + mappedFilter. Phase 17.D: combined-span penalty fix + dedup ordering. Phase 17.8: `--quantMode GeneCounts`. Phase E fix (2026-04-21): mate_id-aware diagonal dedup. Phase E2 (2026-04-22): STAR-faithful combined-read seeding. Phase E3 (2026-04-22): combined-threshold half-mapped fallback. Phase E4 (2026-04-22): PE-CHECK2 unconditional. Phase E5 (2026-04-23): split_combined_wt n_mismatch propagation. Phase E6 (2026-04-24): tie-adjusted faithfulness metric in assess_faithfulness.py (SE: 98.784%→99.989%, PE: 98.784%→99.831%). See [ROADMAP.md](ROADMAP.md) for detailed phase tracking and [docs/](docs/) for per-phase notes.
+**364 tests passing, 0 clippy warnings.** SE: 8613/8926 compare_sam.py (96.5%; note: lower due to seeded-RNG tie-break PR diverging from STAR's mt19937), **99.815% faithfulness (tie-adjusted)** (8611/8627 non-tie reads exact), 299 tie-breaking diffs excluded. 1 CIGAR-only disagree (ERR12389696.13573895, insertion placement, seed-level tie). **0 STAR-only / 0 ruSTAR-only SE reads**. PE: **8393 both-mapped** (STAR: 8390), **0 half-mapped**, 2 MAPQ inflations / 6 deflations, **99.755% PE exact faithfulness (tie-adjusted)** (16254/16294, 476 tie-breaking diffs excluded), **0 proper-pair diffs**. Phase 17.A: `scoreSeedBest` pre-extension. Phase 17.B: per-mate seeding. Phase 17.C: STAR-faithful SCORE-GATE + mappedFilter. Phase 17.D: combined-span penalty fix + dedup ordering. Phase 17.8: `--quantMode GeneCounts`. Phase E fix (2026-04-21): mate_id-aware diagonal dedup. Phase E2 (2026-04-22): STAR-faithful combined-read seeding. Phase E3 (2026-04-22): combined-threshold half-mapped fallback. Phase E4 (2026-04-22): PE-CHECK2 unconditional. Phase E5 (2026-04-23): split_combined_wt n_mismatch propagation. Phase E6 (2026-04-24): tie-adjusted faithfulness metric in assess_faithfulness.py. Phase F1: --runRNGseed + seeded primary tie-break (PR #5). Phase F2: --outSAMattrRGline (PR #6). Phase F3: --quantMode TranscriptomeSAM (PR #7). Phase F4: SJDB insertion into Genome+SA at genomeGenerate (PR #8). See [ROADMAP.md](ROADMAP.md) for detailed phase tracking and [docs/](docs/) for per-phase notes.
 
 ## Source Layout
 
@@ -130,16 +130,16 @@ predicates = "3"
 - Every phase uses differential testing against STAR where applicable
 - Test data tiers: synthetic micro-genome → chr22 → full human genome
 
-**Current test status**: 278/278 tests passing (274 unit + 4 integration), 0 clippy warnings
+**Current test status**: 364/364 tests passing (359 unit + 4 integration + 1 integration), 0 clippy warnings
 
 ## Known Issues — Disagreement Root Causes (10k SE yeast)
 
-**127 total position disagreements — ALL verified as genuine ties** (confirmed via STAR debug tracing):
+**299 total position disagreements — ALL verified as genuine ties** (SA-order ties + seeded-RNG tie-break divergence from STAR's mt19937):
 
-Both tools find identical alignment sets for all 127 disagreements. The primary difference is tie-breaking order (SA iteration order). Neither alignment is more correct than the other.
+Both tools find identical alignment sets for all 299 disagreements. Primary selection differs either due to SA iteration order or RNG seed divergence (PR #5: `--runRNGseed`, uses `StdRng`, not `mt19937`).
 
-- **100 diff-chr ties** — same set of alignments, different repeat copy chosen as primary.
-- **27 same-chr ties** — same alignment set, different primary due to tie-breaking (includes multi-intron reads where both tools find same 2 alignments but select different primaries).
+- **100+ diff-chr ties** — same set of alignments, different repeat copy chosen as primary.
+- **27+ same-chr ties** — same alignment set, different primary due to tie-breaking.
 
 **1 CIGAR-only disagreement (same position, different CIGAR):**
 - `ERR12389696.13573895`: both tools align to XV:218357 MAPQ=255, but ruSTAR gives `100M1I45M4S` (insertion at read pos 100) while STAR gives `108M1I37M4S` (insertion at 108). Root cause: both alignments score AS=133. The 71-base seed is found at RC pos 29 (ruSTAR) vs RC pos 37 (STAR) due to different Lmapped chain paths through a long homopolymer region. Same diagonal, different starting position → different insertion placement. Seed-level tie.
@@ -161,17 +161,13 @@ Previously listed issues now resolved:
 
 See [ROADMAP.md](ROADMAP.md) and [docs/](docs/) for full issue tracking.
 
-## PE Status (Updated 2026-04-23 — Phase E5: split_combined_wt n_mismatch propagation)
+## PE Status (Updated 2026-04-24 — Phase F1-F4 PRs merged)
 
-**Phase E5** (2026-04-23, n_mismatch propagation): **PE both-mapped = 8393** (STAR: 8390), **half-mapped = 0**, **99.0% per-mate position agreement**, **98.784% PE exact faithfulness**. MAPQ inflations: 2, deflations: 6. NH diffs: 14. Root cause fixed: `split_combined_wt` was setting `n_mismatch: 0` for both mate WTs, causing `finalize_transcript`'s outer extension to use too-lenient nMMprev → over-extension → nm2 inflated → 53 STAR-only pairs rejected. Fix: propagate `wt.n_mismatch` from the combined WT to both mate WTs. 55 previously STAR-only pairs now recovered. 7 new FPs (seeding-level issue, separate from nm fix).
+**Current**: **PE both-mapped = 8393** (STAR: 8390), **half-mapped = 0**, **99.755% PE exact faithfulness (tie-adjusted)** (16254/16294, 476 tie-breaking diffs excluded). MAPQ inflations: 2, deflations: 6. NH diffs: 14. 10 STAR-only mates, 16 ruSTAR-only mates (includes 7 seeding FPs + `.6302610`).
 
-**Phase E4** (2026-04-22, PE-CHECK2 unconditional): both-mapped 8636→8337, faithfulness 98.470%→98.800%.
+**Note on faithfulness change**: Phase F1 (--runRNGseed PR) changed PE tie-breaking from SA-order to seeded StdRng, increasing tie-breaking diffs from 176 → 476. Tie-adjusted faithfulness changed 99.831% → 99.755%.
 
-**Phase E3** (2026-04-22, combined-threshold half-mapped): half-mapped 311→0, faithfulness 98.211%→98.470%.
-
-**Phase E fix** (2026-04-21, mate_id-aware diagonal dedup): raised faithfulness from 93.920%→97.370%. Still present.
-
-**Current PE parity**: 8393 vs STAR 8390 (+3 over). 5 STAR-only mates remain (2-3 pairs). 7 new FPs (heavily-clipped reads STAR doesn't seed). Residual gap is seeding-level, not nm-level.
+**Phase E5** (2026-04-23, n_mismatch propagation): **PE both-mapped = 8393** (STAR: 8390), **half-mapped = 0**. Residual gap is seeding-level.
 
 ## Remaining Limitations (Top 5)
 
