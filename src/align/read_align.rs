@@ -1356,6 +1356,7 @@ mod tests {
             sa_index,
             junction_db: crate::junction::SpliceJunctionDb::empty(),
             transcriptome: None,
+            prepared_junctions: Vec::new(),
         }
     }
 
