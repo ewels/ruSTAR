@@ -55,6 +55,16 @@ target/release/ruSTAR \
   --outFileNamePrefix /path/to/output_
 ```
 
+### Coordinate-sorted BAM output
+
+```bash
+target/release/ruSTAR \
+  --genomeDir /path/to/genome_index \
+  --readFilesIn reads.fq \
+  --outSAMtype BAM SortedByCoordinate \
+  --outFileNamePrefix /path/to/output_
+```
+
 ### Two-pass mode
 
 ```bash
@@ -112,7 +122,7 @@ Benchmarked on 10,000 yeast RNA-seq reads (150 bp, ERR12389696), compared to STA
 ## Supported Features
 
 - Single-end and paired-end alignment with mate rescue
-- SAM and unsorted BAM output (`--outSAMtype SAM` or `BAM Unsorted`)
+- SAM, unsorted BAM, and coordinate-sorted BAM output (`--outSAMtype SAM`, `BAM Unsorted`, or `BAM SortedByCoordinate`)
 - Multi-threaded parallel alignment (`--runThreadN`)
 - GTF-based junction annotation with scoring bonus (`--sjdbGTFfile`)
 - Two-pass mode for novel junction discovery (`--twopassMode Basic`)
@@ -135,7 +145,6 @@ Benchmarked on 10,000 yeast RNA-seq reads (150 bp, ERR12389696), compared to STA
 
 ## Known Limitations
 
-- No coordinate-sorted BAM output (use `samtools sort` post-alignment)
 - No paired-end chimeric detection
 - No `--outReadsUnmapped Fastx`
 - No `--outStd SAM/BAM` (stdout streaming)

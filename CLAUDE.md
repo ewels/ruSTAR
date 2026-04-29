@@ -32,7 +32,7 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Status
 
-**364 tests passing, 0 clippy warnings.** SE: 8613/8926 compare_sam.py (96.5%; note: lower due to seeded-RNG tie-break PR diverging from STAR's mt19937), **99.815% faithfulness (tie-adjusted)** (8611/8627 non-tie reads exact), 299 tie-breaking diffs excluded. 1 CIGAR-only disagree (ERR12389696.13573895, insertion placement, seed-level tie). **0 STAR-only / 0 ruSTAR-only SE reads**. PE: **8390 both-mapped** (STAR: 8390), **0 half-mapped**, 0 MAPQ inflations / 0 deflations, **99.883% PE exact faithfulness (tie-adjusted)** (16284/16306, 475 tie-breaking diffs excluded), **0 proper-pair diffs**, **0 NH diffs**. Phase 17.A: `scoreSeedBest` pre-extension. Phase 17.B: per-mate seeding. Phase 17.C: STAR-faithful SCORE-GATE + mappedFilter. Phase 17.D: combined-span penalty fix + dedup ordering. Phase 17.8: `--quantMode GeneCounts`. Phase E fix (2026-04-21): mate_id-aware diagonal dedup. Phase E2 (2026-04-22): STAR-faithful combined-read seeding. Phase E3 (2026-04-22): combined-threshold half-mapped fallback. Phase E4 (2026-04-22): PE-CHECK2 unconditional. Phase E5 (2026-04-23): split_combined_wt n_mismatch propagation. Phase E6 (2026-04-24): tie-adjusted faithfulness metric in assess_faithfulness.py. Phase F1: --runRNGseed + seeded primary tie-break (PR #5). Phase F2: --outSAMattrRGline (PR #6). Phase F3: --quantMode TranscriptomeSAM (PR #7). Phase F4: SJDB insertion into Genome+SA at genomeGenerate (PR #8). Phase G1 (2026-04-29): junction_shifts fix in split_combined_wt (rDNA cross-copy false-splice filter). Phase G2 (2026-04-29): MAX_RECURSION 10k→100k + sa_pos_to_forward overflow fix (ERR12389696.7118031 NH=3→9). See [ROADMAP.md](ROADMAP.md) for detailed phase tracking and [docs/](docs/) for per-phase notes.
+**364 tests passing, 0 clippy warnings.** SE: 8613/8926 compare_sam.py (96.5%; note: lower due to seeded-RNG tie-break PR diverging from STAR's mt19937), **99.815% faithfulness (tie-adjusted)** (8611/8627 non-tie reads exact), 299 tie-breaking diffs excluded. 1 CIGAR-only disagree (ERR12389696.13573895, insertion placement, seed-level tie). **0 STAR-only / 0 ruSTAR-only SE reads**. PE: **8390 both-mapped** (STAR: 8390), **0 half-mapped**, 0 MAPQ inflations / 0 deflations, **99.883% PE exact faithfulness (tie-adjusted)** (16284/16306, 475 tie-breaking diffs excluded), **0 proper-pair diffs**, **0 NH diffs**. Phase 17.A: `scoreSeedBest` pre-extension. Phase 17.B: per-mate seeding. Phase 17.C: STAR-faithful SCORE-GATE + mappedFilter. Phase 17.D: combined-span penalty fix + dedup ordering. Phase 17.8: `--quantMode GeneCounts`. Phase E fix (2026-04-21): mate_id-aware diagonal dedup. Phase E2 (2026-04-22): STAR-faithful combined-read seeding. Phase E3 (2026-04-22): combined-threshold half-mapped fallback. Phase E4 (2026-04-22): PE-CHECK2 unconditional. Phase E5 (2026-04-23): split_combined_wt n_mismatch propagation. Phase E6 (2026-04-24): tie-adjusted faithfulness metric in assess_faithfulness.py. Phase F1: --runRNGseed + seeded primary tie-break (PR #5). Phase F2: --outSAMattrRGline (PR #6). Phase F3: --quantMode TranscriptomeSAM (PR #7). Phase F4: SJDB insertion into Genome+SA at genomeGenerate (PR #8). Phase G1 (2026-04-29): junction_shifts fix in split_combined_wt (rDNA cross-copy false-splice filter). Phase G2 (2026-04-29): MAX_RECURSION 10k→100k + sa_pos_to_forward overflow fix (ERR12389696.7118031 NH=3→9). Phase 17.2 (2026-04-29): coordinate-sorted BAM output (`--outSAMtype BAM SortedByCoordinate` → `Aligned.sortedByCoord.out.bam`). See [ROADMAP.md](ROADMAP.md) for detailed phase tracking and [docs/](docs/) for per-phase notes.
 
 ## Source Layout
 
@@ -64,7 +64,7 @@ src/
     mod.rs         -- Module exports
     fastq.rs       -- FASTQ reader (plain + gzip, noodles wrapper)
     sam.rs         -- SAM writer (header + records, noodles wrapper)
-    bam.rs         -- BAM writer (BGZF compression, streaming unsorted output)
+    bam.rs         -- BAM writer (BGZF compression, streaming unsorted + in-memory sorted output)
   junction/
     mod.rs         -- GTF parsing, junction database, motif detection, two-pass filtering
     sj_output.rs   -- SJ.out.tab writer
@@ -173,10 +173,9 @@ See [ROADMAP.md](ROADMAP.md) and [docs/](docs/) for full issue tracking.
 
 ## Remaining Limitations (Top 5)
 
-- No coordinate-sorted BAM output (use `samtools sort`) — Phase 17.2
 - No PE chimeric detection — Phase 17.3
-- No `--outStd SAM/BAM` (stdout output) — Phase 17.6
 - No `--outReadsUnmapped Fastx` — Phase 17.4
+- No `--outStd SAM/BAM` (stdout output) — Phase 17.6
 - No STARsolo single-cell features — Phase 14 (deferred)
 
 See [docs/phase17_features.md](docs/phase17_features.md) for full feature status.
