@@ -32,7 +32,7 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Status
 
-**364 tests passing, 0 clippy warnings.** SE: 8613/8926 compare_sam.py (96.5%; note: lower due to seeded-RNG tie-break PR diverging from STAR's mt19937), **99.815% faithfulness (tie-adjusted)** (8611/8627 non-tie reads exact), 299 tie-breaking diffs excluded. 1 CIGAR-only disagree (ERR12389696.13573895, insertion placement, seed-level tie). **0 STAR-only / 0 ruSTAR-only SE reads**. PE: **8393 both-mapped** (STAR: 8390), **0 half-mapped**, 2 MAPQ inflations / 6 deflations, **99.755% PE exact faithfulness (tie-adjusted)** (16254/16294, 476 tie-breaking diffs excluded), **0 proper-pair diffs**. Phase 17.A: `scoreSeedBest` pre-extension. Phase 17.B: per-mate seeding. Phase 17.C: STAR-faithful SCORE-GATE + mappedFilter. Phase 17.D: combined-span penalty fix + dedup ordering. Phase 17.8: `--quantMode GeneCounts`. Phase E fix (2026-04-21): mate_id-aware diagonal dedup. Phase E2 (2026-04-22): STAR-faithful combined-read seeding. Phase E3 (2026-04-22): combined-threshold half-mapped fallback. Phase E4 (2026-04-22): PE-CHECK2 unconditional. Phase E5 (2026-04-23): split_combined_wt n_mismatch propagation. Phase E6 (2026-04-24): tie-adjusted faithfulness metric in assess_faithfulness.py. Phase F1: --runRNGseed + seeded primary tie-break (PR #5). Phase F2: --outSAMattrRGline (PR #6). Phase F3: --quantMode TranscriptomeSAM (PR #7). Phase F4: SJDB insertion into Genome+SA at genomeGenerate (PR #8). See [ROADMAP.md](ROADMAP.md) for detailed phase tracking and [docs/](docs/) for per-phase notes.
+**364 tests passing, 0 clippy warnings.** SE: 8613/8926 compare_sam.py (96.5%; note: lower due to seeded-RNG tie-break PR diverging from STAR's mt19937), **99.815% faithfulness (tie-adjusted)** (8611/8627 non-tie reads exact), 299 tie-breaking diffs excluded. 1 CIGAR-only disagree (ERR12389696.13573895, insertion placement, seed-level tie). **0 STAR-only / 0 ruSTAR-only SE reads**. PE: **8390 both-mapped** (STAR: 8390), **0 half-mapped**, 2 MAPQ inflations / 0 deflations, **99.865% PE exact faithfulness (tie-adjusted)** (16283/16305, 473 tie-breaking diffs excluded), **0 proper-pair diffs**. Phase 17.A: `scoreSeedBest` pre-extension. Phase 17.B: per-mate seeding. Phase 17.C: STAR-faithful SCORE-GATE + mappedFilter. Phase 17.D: combined-span penalty fix + dedup ordering. Phase 17.8: `--quantMode GeneCounts`. Phase E fix (2026-04-21): mate_id-aware diagonal dedup. Phase E2 (2026-04-22): STAR-faithful combined-read seeding. Phase E3 (2026-04-22): combined-threshold half-mapped fallback. Phase E4 (2026-04-22): PE-CHECK2 unconditional. Phase E5 (2026-04-23): split_combined_wt n_mismatch propagation. Phase E6 (2026-04-24): tie-adjusted faithfulness metric in assess_faithfulness.py. Phase F1: --runRNGseed + seeded primary tie-break (PR #5). Phase F2: --outSAMattrRGline (PR #6). Phase F3: --quantMode TranscriptomeSAM (PR #7). Phase F4: SJDB insertion into Genome+SA at genomeGenerate (PR #8). Phase G1 (2026-04-29): junction_shifts fix in split_combined_wt (rDNA cross-copy false-splice filter). See [ROADMAP.md](ROADMAP.md) for detailed phase tracking and [docs/](docs/) for per-phase notes.
 
 ## Source Layout
 
@@ -161,13 +161,13 @@ Previously listed issues now resolved:
 
 See [ROADMAP.md](ROADMAP.md) and [docs/](docs/) for full issue tracking.
 
-## PE Status (Updated 2026-04-24 — Phase F1-F4 PRs merged)
+## PE Status (Updated 2026-04-29 — Phase G1)
 
-**Current**: **PE both-mapped = 8393** (STAR: 8390), **half-mapped = 0**, **99.755% PE exact faithfulness (tie-adjusted)** (16254/16294, 476 tie-breaking diffs excluded). MAPQ inflations: 2, deflations: 6. NH diffs: 14. 10 STAR-only mates, 16 ruSTAR-only mates (includes 7 seeding FPs + `.6302610`).
+**Current**: **PE both-mapped = 8390** (STAR: 8390, exact match!), **half-mapped = 0**, **99.865% PE exact faithfulness (tie-adjusted)** (16283/16305, 473 tie-breaking diffs excluded). MAPQ inflations: 2, deflations: 0. NH diffs: 2. 1 STAR-only mate (`.18919121`, SA-level diff), 1 ruSTAR-only mate (`.6302610`, pre-existing FP).
 
-**Note on faithfulness change**: Phase F1 (--runRNGseed PR) changed PE tie-breaking from SA-order to seeded StdRng, increasing tie-breaking diffs from 176 → 476. Tie-adjusted faithfulness changed 99.831% → 99.755%.
+**Phase G1** (2026-04-29): `split_combined_wt` junction_idx fix. Mate-boundary crossings do NOT have entries in `wt.junction_motifs` (they use `is_mate_boundary` code path). Previously, the junction_idx counter was advanced for mate-boundary "junctions", causing the intra-mate cross-copy splice's junction_shifts to be skipped. After the fix, `finalize_transcript`'s overhang check (which requires `exon_len >= alignSJoverhangMin + shiftSJ`) correctly fires for the rDNA cross-copy false-splice WTs (jjL=256 → threshold=261 > exL=51 → FAIL). This reduces `.16980960`'s pairs from 11 to 9, matching STAR's NH=9.
 
-**Phase E5** (2026-04-23, n_mismatch propagation): **PE both-mapped = 8393** (STAR: 8390), **half-mapped = 0**. Residual gap is seeding-level.
+**Note on faithfulness change**: Phase F1 (--runRNGseed PR) changed PE tie-breaking from SA-order to seeded StdRng, increasing tie-breaking diffs. Phase G1 improved tie-adjusted faithfulness from 99.755% → 99.865%.
 
 ## Remaining Limitations (Top 5)
 

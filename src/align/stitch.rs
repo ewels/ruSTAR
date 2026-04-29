@@ -2356,14 +2356,19 @@ pub(crate) fn split_combined_wt(
             m2_exons.push(ex2);
         }
 
-        // Classify the gap to the next exon as splice junction or mate boundary
-        if i + 1 < wt.exons.len() && junction_idx < wt.junction_motifs.len() {
+        // Classify the gap to the next exon as splice junction or mate boundary.
+        // IMPORTANT: mate-boundary transitions (ex.mate_id != next.mate_id) use the
+        // is_mate_boundary code path in stitch_align_to_transcript, which does NOT push
+        // to wt.junction_motifs. Only intra-mate junctions have entries in junction_motifs,
+        // so junction_idx must only advance for intra-mate junctions.
+        if i + 1 < wt.exons.len() {
             let next = &wt.exons[i + 1];
             let genome_gap = next.genome_start as i64 - ex.genome_end as i64;
             let read_gap = next.read_start as i64 - ex.read_end as i64;
-            if genome_gap - read_gap.max(0) >= align_intron_min as i64 {
-                // Splice junction: assign to the mate both exons belong to
-                if ex.mate_id == next.mate_id {
+            let del = genome_gap - read_gap.max(0);
+            if del >= align_intron_min as i64 && ex.mate_id == next.mate_id {
+                // Intra-mate splice junction: assign to the owning mate
+                if junction_idx < wt.junction_motifs.len() {
                     if ex.mate_id == 0 {
                         m1_jm.push(wt.junction_motifs[junction_idx]);
                         m1_ja.push(wt.junction_annotated[junction_idx]);
@@ -2373,8 +2378,8 @@ pub(crate) fn split_combined_wt(
                         m2_ja.push(wt.junction_annotated[junction_idx]);
                         m2_js.push(wt.junction_shifts[junction_idx]);
                     }
+                    junction_idx += 1;
                 }
-                junction_idx += 1;
             }
         }
     }
@@ -2751,8 +2756,8 @@ pub(crate) fn stitch_seeds_core(
         );
         for (i, wa) in wa_entries.iter().enumerate().take(30) {
             eprintln!(
-                "  wa[{}]: read_pos={}, sa_pos={}, genome_pos={}, length={}, anchor={}",
-                i, wa.read_pos, wa.sa_pos, wa.genome_pos, wa.length, wa.is_anchor
+                "  wa[{}]: read_pos={}, sa_pos={}, genome_pos={}, length={}, anchor={}, mate={}",
+                i, wa.read_pos, wa.sa_pos, wa.genome_pos, wa.length, wa.is_anchor, wa.mate_id
             );
         }
         if wa_entries.len() > 30 {
