@@ -1884,6 +1884,13 @@ pub(crate) fn finalize_transcript(
         }
     }
 
+    // Guard: reverse-strand alignment must not extend past genome end
+    if cluster.is_reverse
+        && adjusted_genome_start + ref_len > index.genome.n_genome
+    {
+        return None;
+    }
+
     // Convert to forward genome coordinates
     let forward_genome_start =
         index.sa_pos_to_forward(adjusted_genome_start, cluster.is_reverse, ref_len as usize);
@@ -1994,7 +2001,7 @@ fn stitch_recurse(
     original_is_reverse: bool,
     debug_name: &str,
 ) {
-    const MAX_RECURSION: u32 = 10_000;
+    const MAX_RECURSION: u32 = 100_000;
 
     if *recursion_count >= MAX_RECURSION {
         return;

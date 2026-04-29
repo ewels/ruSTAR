@@ -152,7 +152,10 @@ impl GenomeIndex {
     /// The raw SA position is still needed for genome base access (add n_genome offset).
     pub fn sa_pos_to_forward(&self, sa_pos: u64, is_reverse: bool, match_length: usize) -> u64 {
         if is_reverse {
-            self.genome.n_genome - sa_pos - match_length as u64
+            self.genome
+                .n_genome
+                .saturating_sub(sa_pos)
+                .saturating_sub(match_length as u64)
         } else {
             sa_pos
         }
