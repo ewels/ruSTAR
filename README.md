@@ -132,6 +132,7 @@ Benchmarked on 10,000 yeast RNA-seq reads (150 bp, ERR12389696), compared to STA
 - Transcriptome-coordinate SAM output (`--quantMode TranscriptomeSAM`)
 - Post-alignment read filtering (`--outFilterType BySJout`)
 - Splice junction output (`SJ.out.tab`)
+- Unmapped read output to FASTQ (`--outReadsUnmapped Fastx` → `Unmapped.out.mate1` / `mate2`)
 - Gzip-compressed FASTQ input (`--readFilesCommand zcat`)
 - Read group tags (`--outSAMattrRGline`)
 - Seeded RNG for reproducible tie-breaking (`--runRNGseed`)
@@ -146,7 +147,6 @@ Benchmarked on 10,000 yeast RNA-seq reads (150 bp, ERR12389696), compared to STA
 ## Known Limitations
 
 - No paired-end chimeric detection
-- No `--outReadsUnmapped Fastx`
 - No `--outStd SAM/BAM` (stdout streaming)
 - No STARsolo single-cell features
 

@@ -254,6 +254,32 @@ fn run_single_pass(
         None
     };
 
+    // Create unmapped FASTQ writers if --outReadsUnmapped Fastx
+    use crate::io::fastq::UnmappedFastqWriter;
+    use crate::params::OutReadsUnmapped;
+
+    let is_paired = params.read_files_in.len() == 2;
+    let mut unmapped_w1: Option<UnmappedFastqWriter> =
+        if params.out_reads_unmapped == OutReadsUnmapped::Fastx {
+            let path = params
+                .out_file_name_prefix
+                .join("Unmapped.out.mate1");
+            info!("Writing unmapped reads to {}", path.display());
+            Some(UnmappedFastqWriter::create(&path)?)
+        } else {
+            None
+        };
+    let mut unmapped_w2: Option<UnmappedFastqWriter> =
+        if params.out_reads_unmapped == OutReadsUnmapped::Fastx && is_paired {
+            let path = params
+                .out_file_name_prefix
+                .join("Unmapped.out.mate2");
+            info!("Writing unmapped mate2 reads to {}", path.display());
+            Some(UnmappedFastqWriter::create(&path)?)
+        } else {
+            None
+        };
+
     // 4. Route to SAM or BAM output based on --outSAMtype
     let out_type = params
         .out_sam_type()
@@ -282,6 +308,7 @@ fn run_single_pass(
                     quant.as_ref(),
                     tr.as_ref(),
                     tr_writer.as_mut(),
+                    unmapped_w1.as_mut(),
                 ),
                 2 => align_reads_paired_end(
                     params,
@@ -292,6 +319,8 @@ fn run_single_pass(
                     quant.as_ref(),
                     tr.as_ref(),
                     tr_writer.as_mut(),
+                    unmapped_w1.as_mut(),
+                    unmapped_w2.as_mut(),
                 ),
                 n => anyhow::bail!("Invalid number of read files: {} (expected 1 or 2)", n),
             }?;
@@ -326,6 +355,7 @@ fn run_single_pass(
                         quant.as_ref(),
                         tr.as_ref(),
                         tr_writer.as_mut(),
+                        unmapped_w1.as_mut(),
                     ),
                     2 => align_reads_paired_end(
                         params,
@@ -336,6 +366,8 @@ fn run_single_pass(
                         quant.as_ref(),
                         tr.as_ref(),
                         tr_writer.as_mut(),
+                        unmapped_w1.as_mut(),
+                        unmapped_w2.as_mut(),
                     ),
                     n => anyhow::bail!(
                         "Invalid number of read files: {} (expected 1 or 2)",
@@ -355,6 +387,7 @@ fn run_single_pass(
                         quant.as_ref(),
                         tr.as_ref(),
                         tr_writer.as_mut(),
+                        unmapped_w1.as_mut(),
                     ),
                     2 => align_reads_paired_end(
                         params,
@@ -365,6 +398,8 @@ fn run_single_pass(
                         quant.as_ref(),
                         tr.as_ref(),
                         tr_writer.as_mut(),
+                        unmapped_w1.as_mut(),
+                        unmapped_w2.as_mut(),
                     ),
                     n => anyhow::bail!(
                         "Invalid number of read files: {} (expected 1 or 2)",
@@ -485,6 +520,7 @@ fn run_pass1(
             None,
             None,
             None,
+            None,
         )?,
         2 => align_reads_paired_end(
             &params_pass1,
@@ -492,6 +528,8 @@ fn run_pass1(
             &mut null_writer,
             &stats,
             &sj_stats,
+            None,
+            None,
             None,
             None,
             None,
@@ -547,6 +585,11 @@ struct AlignmentBatchResults {
     /// Transcriptome-space SAM records for `--quantMode TranscriptomeSAM`.
     /// Empty unless that mode is enabled.
     transcriptome_records: Vec<noodles::sam::alignment::record_buf::RecordBuf>,
+    /// Unmapped reads for `--outReadsUnmapped Fastx` (name, encoded_seq, qual).
+    /// mate1 file (also used for SE). Empty unless that mode is enabled.
+    unmapped_mate1: Vec<(String, Vec<u8>, Vec<u8>)>,
+    /// Unmapped mate2 reads (PE only). Empty unless outReadsUnmapped=Fastx.
+    unmapped_mate2: Vec<(String, Vec<u8>, Vec<u8>)>,
 }
 
 /// Build transcriptome-space records for a single-end read.  Projects every
@@ -774,6 +817,7 @@ fn align_reads_single_end<W: AlignmentWriter>(
     quant_ctx: Option<&std::sync::Arc<crate::quant::QuantContext>>,
     tr_idx: Option<&std::sync::Arc<crate::quant::transcriptome::TranscriptomeIndex>>,
     mut tr_writer: Option<&mut crate::io::bam::BamWriter>,
+    mut unmapped_writer: Option<&mut crate::io::fastq::UnmappedFastqWriter>,
 ) -> anyhow::Result<()> {
     use crate::align::read_align::align_read;
     use crate::io::fastq::{FastqReader, clip_read};
@@ -817,6 +861,7 @@ fn align_reads_single_end<W: AlignmentWriter>(
     let clip3p = params.clip3p_nbases as usize;
     let max_multimaps = params.out_filter_multimap_nmax as usize;
     let output_unmapped = params.out_sam_unmapped != params::OutSamUnmapped::None;
+    let write_unmapped_fastq = params.out_reads_unmapped == params::OutReadsUnmapped::Fastx;
     let by_sjout = params.out_filter_type == OutFilterType::BySJout;
     let rg_id_owned = params.primary_rg_id()?;
 
@@ -883,11 +928,18 @@ fn align_reads_single_end<W: AlignmentWriter>(
                         )?;
                         buffer.push(record);
                     }
+                    let unmapped_m1 = if write_unmapped_fastq {
+                        vec![(read.name.clone(), clipped_seq.clone(), clipped_qual.clone())]
+                    } else {
+                        Vec::new()
+                    };
                     return Ok(AlignmentBatchResults {
                         sam_records: buffer,
                         chimeric_alns,
                         primary_junction_keys: Vec::new(),
                         transcriptome_records: Vec::new(),
+                        unmapped_mate1: unmapped_m1,
+                        unmapped_mate2: Vec::new(),
                     });
                 }
 
@@ -941,7 +993,8 @@ fn align_reads_single_end<W: AlignmentWriter>(
                     };
 
                 // Build SAM records (no I/O, just construction)
-                if transcripts.is_empty() {
+                let is_unmapped_se = transcripts.is_empty();
+                if is_unmapped_se {
                     // Unmapped
                     if output_unmapped {
                         let record = SamWriter::build_unmapped_record(
@@ -986,11 +1039,19 @@ fn align_reads_single_end<W: AlignmentWriter>(
                         Vec::new()
                     };
 
+                let unmapped_m1 = if write_unmapped_fastq && is_unmapped_se {
+                    vec![(read.name.clone(), clipped_seq.clone(), clipped_qual.clone())]
+                } else {
+                    Vec::new()
+                };
+
                 Ok(AlignmentBatchResults {
                     sam_records: buffer,
                     chimeric_alns,
                     primary_junction_keys,
                     transcriptome_records,
+                    unmapped_mate1: unmapped_m1,
+                    unmapped_mate2: Vec::new(),
                 })
             })
             .collect();
@@ -1021,6 +1082,13 @@ fn align_reads_single_end<W: AlignmentWriter>(
                             &index.genome.chr_name,
                             &chim_aln.read_name,
                         )?;
+                    }
+                }
+
+                // Write unmapped FASTQ records
+                if let Some(ref mut uw) = unmapped_writer {
+                    for (name, seq, qual) in &batch.unmapped_mate1 {
+                        uw.write_record(name, seq, qual)?;
                     }
                 }
             }
@@ -1082,6 +1150,13 @@ fn align_reads_single_end<W: AlignmentWriter>(
                     )?;
                 }
             }
+
+            // Write unmapped FASTQ records
+            if let Some(ref mut uw) = unmapped_writer {
+                for (name, seq, qual) in &batch.unmapped_mate1 {
+                    uw.write_record(name, seq, qual)?;
+                }
+            }
         }
 
         info!(
@@ -1094,6 +1169,11 @@ fn align_reads_single_end<W: AlignmentWriter>(
     if let Some(ref mut chim_writer) = chimeric_writer {
         chim_writer.flush()?;
         info!("Chimeric junction output complete");
+    }
+
+    // Flush unmapped FASTQ writer
+    if let Some(ref mut uw) = unmapped_writer {
+        uw.flush()?;
     }
 
     Ok(())
@@ -1110,6 +1190,8 @@ fn align_reads_paired_end<W: AlignmentWriter>(
     quant_ctx: Option<&std::sync::Arc<crate::quant::QuantContext>>,
     tr_idx: Option<&std::sync::Arc<crate::quant::transcriptome::TranscriptomeIndex>>,
     mut tr_writer: Option<&mut crate::io::bam::BamWriter>,
+    mut unmapped_writer1: Option<&mut crate::io::fastq::UnmappedFastqWriter>,
+    mut unmapped_writer2: Option<&mut crate::io::fastq::UnmappedFastqWriter>,
 ) -> anyhow::Result<()> {
     use crate::align::read_align::{PairedAlignment, PairedAlignmentResult, align_paired_read};
     use crate::io::fastq::{PairedFastqReader, clip_read};
@@ -1160,6 +1242,7 @@ fn align_reads_paired_end<W: AlignmentWriter>(
     let clip3p = params.clip3p_nbases as usize;
     let max_multimaps = params.out_filter_multimap_nmax as usize;
     let output_unmapped = params.out_sam_unmapped != params::OutSamUnmapped::None;
+    let write_unmapped_fastq = params.out_reads_unmapped == params::OutReadsUnmapped::Fastx;
     let by_sjout = params.out_filter_type == OutFilterType::BySJout;
 
     // Buffer for BySJout mode
@@ -1238,11 +1321,21 @@ fn align_reads_paired_end<W: AlignmentWriter>(
                             buffer.push(record);
                         }
                     }
+                    let (um1, um2) = if write_unmapped_fastq {
+                        (
+                            vec![(paired_read.mate1.name.clone(), m1_seq.clone(), m1_qual.clone())],
+                            vec![(paired_read.mate2.name.clone(), m2_seq.clone(), m2_qual.clone())],
+                        )
+                    } else {
+                        (Vec::new(), Vec::new())
+                    };
                     return Ok(AlignmentBatchResults {
                         sam_records: buffer,
                         chimeric_alns: Vec::new(),
                         primary_junction_keys: Vec::new(),
                         transcriptome_records: Vec::new(),
+                        unmapped_mate1: um1,
+                        unmapped_mate2: um2,
                     });
                 }
 
@@ -1443,11 +1536,30 @@ fn align_reads_paired_end<W: AlignmentWriter>(
                         Vec::new()
                     };
 
+                // Collect unmapped mates for --outReadsUnmapped Fastx.
+                // Write both mates if: pair is fully unmapped OR half-mapped.
+                // STAR writes both mates of half-mapped pairs to the unmapped files.
+                let (unmapped_mate1, unmapped_mate2) = if write_unmapped_fastq {
+                    let pair_unmapped = results.is_empty() || has_half_mapped;
+                    if pair_unmapped {
+                        (
+                            vec![(paired_read.mate1.name.clone(), m1_seq.clone(), m1_qual.clone())],
+                            vec![(paired_read.mate2.name.clone(), m2_seq.clone(), m2_qual.clone())],
+                        )
+                    } else {
+                        (Vec::new(), Vec::new())
+                    }
+                } else {
+                    (Vec::new(), Vec::new())
+                };
+
                 Ok(AlignmentBatchResults {
                     sam_records: buffer,
                     chimeric_alns: Vec::new(),
                     primary_junction_keys,
                     transcriptome_records,
+                    unmapped_mate1,
+                    unmapped_mate2,
                 })
             })
             .collect();
@@ -1464,6 +1576,16 @@ fn align_reads_paired_end<W: AlignmentWriter>(
                 writer.write_batch(&batch.sam_records.records)?;
                 if let Some(ref mut tw) = tr_writer {
                     tw.write_batch(&batch.transcriptome_records)?;
+                }
+                if let Some(ref mut uw1) = unmapped_writer1 {
+                    for (name, seq, qual) in &batch.unmapped_mate1 {
+                        uw1.write_record(name, seq, qual)?;
+                    }
+                }
+                if let Some(ref mut uw2) = unmapped_writer2 {
+                    for (name, seq, qual) in &batch.unmapped_mate2 {
+                        uw2.write_record(name, seq, qual)?;
+                    }
                 }
             }
         }
@@ -1508,6 +1630,16 @@ fn align_reads_paired_end<W: AlignmentWriter>(
             if let Some(ref mut tw) = tr_writer {
                 tw.write_batch(&batch.transcriptome_records)?;
             }
+            if let Some(ref mut uw1) = unmapped_writer1 {
+                for (name, seq, qual) in &batch.unmapped_mate1 {
+                    uw1.write_record(name, seq, qual)?;
+                }
+            }
+            if let Some(ref mut uw2) = unmapped_writer2 {
+                for (name, seq, qual) in &batch.unmapped_mate2 {
+                    uw2.write_record(name, seq, qual)?;
+                }
+            }
         }
 
         info!(
@@ -1519,6 +1651,14 @@ fn align_reads_paired_end<W: AlignmentWriter>(
     // Flush chimeric output if enabled (currently no chimeric alignments from paired-end)
     if let Some(ref mut chim_writer) = chimeric_writer {
         chim_writer.flush()?;
+    }
+
+    // Flush unmapped FASTQ writers
+    if let Some(ref mut uw1) = unmapped_writer1 {
+        uw1.flush()?;
+    }
+    if let Some(ref mut uw2) = unmapped_writer2 {
+        uw2.flush()?;
     }
 
     Ok(())

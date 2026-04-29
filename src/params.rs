@@ -150,6 +150,30 @@ impl std::fmt::Display for OutSamType {
 }
 
 // ---------------------------------------------------------------------------
+// Unmapped reads FASTQ output
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum OutReadsUnmapped {
+    #[default]
+    None,
+    Fastx,
+}
+
+impl std::str::FromStr for OutReadsUnmapped {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "None" => Ok(Self::None),
+            "Fastx" => Ok(Self::Fastx),
+            _ => Err(format!(
+                "unknown outReadsUnmapped value: '{s}'; expected 'None' or 'Fastx'"
+            )),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // SAM unmapped output
 // ---------------------------------------------------------------------------
 
@@ -315,6 +339,10 @@ pub struct Parameters {
     /// Unmapped reads in SAM output: None or Within
     #[arg(long = "outSAMunmapped", default_value = "None")]
     pub out_sam_unmapped: OutSamUnmapped,
+
+    /// Output unmapped reads to FASTQ file(s): None or Fastx
+    #[arg(long = "outReadsUnmapped", default_value = "None")]
+    pub out_reads_unmapped: OutReadsUnmapped,
 
     /// MAPQ value for unique mappers
     #[arg(long = "outSAMmapqUnique", default_value_t = 255)]
