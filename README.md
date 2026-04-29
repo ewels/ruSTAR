@@ -6,7 +6,7 @@ A Rust reimplementation of [STAR](https://github.com/alexdobin/STAR) (Spliced Tr
 
 ruSTAR aims to be a faithful port of STAR, matching the original behavior as closely as possible. It uses the same genome index format, accepts the same `--camelCase` command-line parameters, and produces compatible SAM/BAM output.
 
-**Current status**: End-to-end single-end and paired-end RNA-seq alignment with splice junction detection, two-pass mode, chimeric alignment detection, and multi-threaded parallel processing. 268 tests passing (264 unit + 4 integration).
+**Current status**: End-to-end single-end and paired-end RNA-seq alignment with splice junction detection, two-pass mode, chimeric alignment detection, gene-level quantification, and multi-threaded parallel processing. 364 tests passing (359 unit + 5 integration), 0 clippy warnings.
 
 ## Quick Start
 
@@ -65,67 +65,49 @@ target/release/ruSTAR \
   --outFileNamePrefix /path/to/output_
 ```
 
+### Gene-level counts
+
+```bash
+target/release/ruSTAR \
+  --genomeDir /path/to/genome_index \
+  --readFilesIn reads.fq \
+  --sjdbGTFfile /path/to/annotation.gtf \
+  --quantMode GeneCounts \
+  --outFileNamePrefix /path/to/output_
+```
+
 ## Accuracy Comparison vs STAR
 
-Benchmarked on 10,000 yeast RNA-seq reads (150 bp SE, ERR12389696), compared to STAR 2.7.x with identical parameters and genome index.
+Benchmarked on 10,000 yeast RNA-seq reads (150 bp, ERR12389696), compared to STAR 2.7.x with identical parameters and genome index.
 
-### Single-End Alignment Rates
+### Single-End (10k reads, 150 bp SE)
 
 | Metric | ruSTAR | STAR |
 |--------|--------|------|
-| Unique mapped | 92.6% | 92.6% |
+| Unique mapped | 82.6% | 82.6% |
 | Multi-mapped | 7.4% | 7.4% |
-| Soft-clipped reads | 26.0% | 26.0% |
-| Splice rate | 2.2% | 2.2% |
-| Shared splice junctions | 67 / 72 STAR junctions | — |
-| Motif agreement (shared junctions) | 100% | — |
+| Total mapped | 90.0% | 90.0% |
+| Position agreement | 96.5% raw / **99.815% tie-adjusted** | — |
+| STAR-only reads | **0** | — |
+| ruSTAR-only reads | **0** | — |
+| CIGAR-only diffs | 1 (seed-level tie in homopolymer) | — |
 
-### Strict Per-Read Comparison (SE)
+> **Tie-adjusted**: 299 of 313 disagreements are verified genuine ties — both tools find identical alignment sets but select different copies due to SA-order or RNG tie-breaking differences. Excluding these, faithfulness is 99.815% (8,611/8,627 non-tie reads exact).
 
-A read is counted as a **match** only if it aligns to the exact same chromosome, exact same start position, and has identical splice junctions (intron coordinates). Any difference in any of these is a mismatch.
-
-| Result | Count | % |
-|--------|-------|---|
-| Exact match (chr + pos + CIGAR identical) | 8799 | 98.57% |
-| Splice match (chr + pos + introns match, CIGAR differs) | 1 | 0.01% |
-| **Total match** | **8800** | **98.57%** |
-| Mismatch — unavoidable tie-breaking | 126 | 1.41% |
-| Mismatch — fixable algorithm differences | 26 | 0.29% |
-| **Parity (excluding unavoidable ties)** | **8800 / 8826** | **99.70%** |
-
-#### Mismatch Classification
-
-| Category | Count | Fixable? |
-|----------|-------|----------|
-| Diff chromosome, both multi-mapper (repeat copy tie-breaking) | 100 | No — same score, different copy chosen |
-| Same chr, identical CIGAR, different position (repeat copy tie-breaking) | ~19 | No — same score, different copy chosen |
-| Wrong intron choice (same chr, different large intron) | 4 | Partial |
-| ruSTAR false splice (adapter contamination, 279 kb intron) | 1 | Yes |
-| STAR-only mapped (high-mismatch read, NM=10) | 1 | Unknown |
-| MAPQ inflation (missed splice/indel secondary) | 4 | Partial |
-| MAPQ deflation (extra unspliced secondary) | 4 | Partial |
-
-> **Unavoidable ties (~119 reads):** Both tools find the same set of equally-scored alignments but choose different ones as primary due to internal processing order. Neither alignment is more correct than the other.
-
-### MAPQ Agreement (SE)
-
-| Metric | Value |
-|--------|-------|
-| MAPQ agreement (position-matched reads) | 99.9% |
-| MAPQ inflation (ruSTAR=255, STAR<255) | 4 reads |
-| MAPQ deflation (ruSTAR<255, STAR=255) | 4 reads |
-
-### Paired-End (10k yeast read pairs, 150 bp)
+### Paired-End (10k read pairs, 150 bp)
 
 | Metric | ruSTAR | STAR |
 |--------|--------|------|
-| Both mates mapped | 8392 | 8390 |
-| Half-mapped pairs | 0 | 0 |
+| Both mates mapped | **8,390** | 8,390 |
+| Half-mapped pairs | **0** | 0 |
 | Unmapped pairs | 0 | 0 |
-| Per-mate position agreement | 98.8% | — |
-| Per-mate CIGAR agreement | 98.5% | — |
+| PE faithfulness (tie-adjusted) | **99.883%** | — |
+| MAPQ inflations | **0** | — |
+| MAPQ deflations | **0** | — |
+| NH tag diffs | **0** | — |
+| Proper-pair diffs | **0** | — |
 
-> **PE parity**: ruSTAR uses STAR's combined-read PE path (`[mate1_fwd][SPACER][RC(mate2)]`). ruSTAR maps 2 more pairs than STAR (8392 vs 8390). The per-mate disagreements (~75/mate diff-chr) are unavoidable multi-mapper tie-breaking differences; ~21-24/mate same-chr disagreements are under investigation.
+> **PE faithfulness**: 16,284 / 16,306 mate alignments exactly match STAR (same position, CIGAR, MAPQ, proper-pair flag, and NH tag). 475 diffs excluded as tie-breaking differences (same MAPQ+NH, different repeat copy chosen).
 
 ## Supported Features
 
@@ -134,27 +116,29 @@ A read is counted as a **match** only if it aligns to the exact same chromosome,
 - Multi-threaded parallel alignment (`--runThreadN`)
 - GTF-based junction annotation with scoring bonus (`--sjdbGTFfile`)
 - Two-pass mode for novel junction discovery (`--twopassMode Basic`)
+- SJDB insertion into genome index at genomeGenerate time
 - Chimeric alignment detection for single-end reads (`--chimSegmentMin`)
+- Gene-level read counting (`--quantMode GeneCounts` → `ReadsPerGene.out.tab`)
+- Transcriptome-coordinate SAM output (`--quantMode TranscriptomeSAM`)
 - Post-alignment read filtering (`--outFilterType BySJout`)
-- Splice junction output (SJ.out.tab)
+- Splice junction output (`SJ.out.tab`)
 - Gzip-compressed FASTQ input (`--readFilesCommand zcat`)
+- Read group tags (`--outSAMattrRGline`)
+- Seeded RNG for reproducible tie-breaking (`--runRNGseed`)
 - SAM optional tags: NH, HI, AS, NM, nM, XS, jM, jI, MD
-- `--outSAMattributes` control (Standard/All/None/explicit)
+- `--outSAMattributes` control (Standard/All/None/explicit list)
 - SECONDARY flag (0x100) on multi-mapper alignments
 - Configurable output limits (`--outSAMmultNmax`)
-- Bidirectional seed search (L-to-R and R-to-L)
+- Bidirectional seed search with `scoreSeedBest` pre-extension
 - Junction boundary optimization (jR scanning)
-- Deterministic output (identical SAM across runs)
 - Log.final.out statistics file (STAR-compatible, MultiQC-parseable)
 
 ## Known Limitations
 
 - No coordinate-sorted BAM output (use `samtools sort` post-alignment)
 - No paired-end chimeric detection
-- No `--quantMode GeneCounts`
 - No `--outReadsUnmapped Fastx`
-- No `--outStd SAM/BAM` (stdout output)
-- Residual MAPQ inflation (4 reads in 10k SE benchmark) — missed splice/indel secondary alignments
+- No `--outStd SAM/BAM` (stdout streaming)
 - No STARsolo single-cell features
 
 See [ROADMAP.md](ROADMAP.md) for detailed implementation tracking.

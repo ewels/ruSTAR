@@ -130,7 +130,7 @@ predicates = "3"
 - Every phase uses differential testing against STAR where applicable
 - Test data tiers: synthetic micro-genome → chr22 → full human genome
 
-**Current test status**: 364/364 tests passing (359 unit + 4 integration + 1 integration), 0 clippy warnings
+**Current test status**: 364/364 tests passing (359 unit + 5 integration), 0 clippy warnings
 
 ## Known Issues — Disagreement Root Causes (10k SE yeast)
 
