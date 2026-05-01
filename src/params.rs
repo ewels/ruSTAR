@@ -674,6 +674,30 @@ pub struct Parameters {
     #[arg(long = "chimScoreMin", default_value_t = 0)]
     pub chim_score_min: i32,
 
+    /// Max drop in chimeric score vs read length (chimericDetectionOld)
+    #[arg(long = "chimScoreDropMax", default_value_t = 20)]
+    pub chim_score_drop_max: i32,
+
+    /// Min score separation for unique chimeric alignment
+    #[arg(long = "chimScoreSeparation", default_value_t = 10)]
+    pub chim_score_separation: i32,
+
+    /// Max multimapping of main chimeric segment
+    #[arg(long = "chimMainSegmentMultNmax", default_value_t = 10)]
+    pub chim_main_segment_mult_nmax: u32,
+
+    /// Max read gap between chimeric segments
+    #[arg(long = "chimSegmentReadGapMax", default_value_t = 0)]
+    pub chim_segment_read_gap_max: u32,
+
+    /// Min overhang at chimeric junction
+    #[arg(long = "chimJunctionOverhangMin", default_value_t = 20)]
+    pub chim_junction_overhang_min: u32,
+
+    /// Score penalty for non-GT/AG chimeric junction
+    #[arg(long = "chimScoreJunctionNonGTAG", default_value_t = -1, allow_hyphen_values = true)]
+    pub chim_score_junction_non_gtag: i32,
+
     /// Chimeric output type
     #[arg(long = "chimOutType", num_args = 1..=2, default_values_t = vec!["Junctions".to_string()])]
     pub chim_out_type: Vec<String>,
@@ -1212,6 +1236,45 @@ mod tests {
             p.chim_out_type,
             vec!["WithinBAM".to_string(), "SoftClip".to_string()]
         );
+    }
+
+    #[test]
+    fn chimeric_params_extended() {
+        let p = parse(&[
+            "--readFilesIn",
+            "r.fq",
+            "--chimSegmentMin",
+            "20",
+            "--chimScoreDropMax",
+            "30",
+            "--chimScoreSeparation",
+            "15",
+            "--chimMainSegmentMultNmax",
+            "5",
+            "--chimSegmentReadGapMax",
+            "3",
+            "--chimJunctionOverhangMin",
+            "12",
+            "--chimScoreJunctionNonGTAG",
+            "-2",
+        ]);
+        assert_eq!(p.chim_score_drop_max, 30);
+        assert_eq!(p.chim_score_separation, 15);
+        assert_eq!(p.chim_main_segment_mult_nmax, 5);
+        assert_eq!(p.chim_segment_read_gap_max, 3);
+        assert_eq!(p.chim_junction_overhang_min, 12);
+        assert_eq!(p.chim_score_junction_non_gtag, -2);
+    }
+
+    #[test]
+    fn chimeric_params_defaults() {
+        let p = parse(&["--readFilesIn", "r.fq"]);
+        assert_eq!(p.chim_score_drop_max, 20);
+        assert_eq!(p.chim_score_separation, 10);
+        assert_eq!(p.chim_main_segment_mult_nmax, 10);
+        assert_eq!(p.chim_segment_read_gap_max, 0);
+        assert_eq!(p.chim_junction_overhang_min, 20);
+        assert_eq!(p.chim_score_junction_non_gtag, -1);
     }
 
     #[test]

@@ -6,7 +6,7 @@
 // - Circular RNAs (back-splices)
 //
 // Detection strategy:
-// - Tier 1: Soft-clip analysis (post-alignment)
+// - Tier 1: chimericDetectionOld (post-stitching, transcript-pair search — detect_chimeric_old)
 // - Tier 2: Multi-cluster chimeric stitching (during clustering)
 
 mod detect;
@@ -14,7 +14,7 @@ mod output;
 mod score;
 mod segment;
 
-pub use detect::{ChimericDetector, detect_inter_mate_chimeric};
+pub use detect::{ChimericDetector, detect_chimeric_old, detect_inter_mate_chimeric};
 pub use output::{ChimericJunctionWriter, build_within_bam_records};
 pub use segment::{ChimericAlignment, ChimericSegment};
 
