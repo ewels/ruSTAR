@@ -152,8 +152,14 @@ fn compare_suffixes(
         let is_padding_b = byte_b == 5;
 
         if is_padding_a && is_padding_b {
-            // Both hit padding at same depth - anti-stable sort by position
-            return pos_b.cmp(&pos_a);
+            // Both hit padding at same depth — sort ascending by packed SA value
+            // (strand bit at position gstrand_bit, same as what's stored in the SA).
+            // For yeast (gstrand_bit=32): FW entries have packed_value = pos (no bit 32),
+            // RC entries have packed_value = pos | (1<<32). All FW entries therefore
+            // sort before all RC entries, matching STAR's tie-breaking behavior.
+            let packed_a = if reverse_a { pos_a | (1usize << 32) } else { pos_a };
+            let packed_b = if reverse_b { pos_b | (1usize << 32) } else { pos_b };
+            return packed_a.cmp(&packed_b);
         }
 
         if is_padding_a {
@@ -171,8 +177,10 @@ fn compare_suffixes(
         }
     }
 
-    // If we exhausted max_len, fall back to position comparison
-    pos_a.cmp(&pos_b)
+    // If we exhausted max_len, fall back to packed SA value comparison
+    let packed_a = if reverse_a { pos_a | (1usize << 32) } else { pos_a };
+    let packed_b = if reverse_b { pos_b | (1usize << 32) } else { pos_b };
+    packed_a.cmp(&packed_b)
 }
 
 #[cfg(test)]
