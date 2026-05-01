@@ -678,6 +678,16 @@ impl Parameters {
         }
     }
 
+    /// Whether `--chimOutType` includes `Junctions` (write Chimeric.out.junction).
+    pub fn chim_out_junctions(&self) -> bool {
+        self.chim_out_type.iter().any(|s| s == "Junctions")
+    }
+
+    /// Whether `--chimOutType` includes `WithinBAM` (write supplementary BAM records).
+    pub fn chim_out_within_bam(&self) -> bool {
+        self.chim_out_type.iter().any(|s| s == "WithinBAM")
+    }
+
     /// Expand `--outSAMattributes` into a set of individual tag names.
     ///
     /// - `"Standard"` → {NH, HI, AS, NM, nM}

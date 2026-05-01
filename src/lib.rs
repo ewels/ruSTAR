@@ -842,7 +842,7 @@ fn align_reads_single_end<W: AlignmentWriter + ?Sized>(
     let mut reader = FastqReader::open(read_file, params.read_files_command.as_deref())?;
 
     // Create chimeric output writer if enabled
-    let mut chimeric_writer = if params.chim_segment_min > 0 {
+    let mut chimeric_writer = if params.chim_segment_min > 0 && params.chim_out_junctions() {
         use crate::chimeric::ChimericJunctionWriter;
         let prefix = params.out_file_name_prefix.to_str().unwrap_or(".");
         info!(
@@ -1091,6 +1091,13 @@ fn align_reads_single_end<W: AlignmentWriter + ?Sized>(
                         )?;
                     }
                 }
+                if params.chim_out_within_bam() {
+                    use crate::chimeric::build_within_bam_records;
+                    for chim_aln in &batch.chimeric_alns {
+                        let supp = build_within_bam_records(chim_aln, &index.genome, 255)?;
+                        writer.write_batch(&supp)?;
+                    }
+                }
 
                 // Write unmapped FASTQ records
                 if let Some(ref mut uw) = unmapped_writer {
@@ -1155,6 +1162,13 @@ fn align_reads_single_end<W: AlignmentWriter + ?Sized>(
                         &index.genome.chr_name,
                         &chim_aln.read_name,
                     )?;
+                }
+            }
+            if params.chim_out_within_bam() {
+                use crate::chimeric::build_within_bam_records;
+                for chim_aln in &batch.chimeric_alns {
+                    let supp = build_within_bam_records(chim_aln, &index.genome, 255)?;
+                    writer.write_batch(&supp)?;
                 }
             }
 
@@ -1223,7 +1237,7 @@ fn align_reads_paired_end<W: AlignmentWriter + ?Sized>(
     )?;
 
     // Create chimeric output writer if enabled
-    let mut chimeric_writer = if params.chim_segment_min > 0 {
+    let mut chimeric_writer = if params.chim_segment_min > 0 && params.chim_out_junctions() {
         use crate::chimeric::ChimericJunctionWriter;
         let prefix = params.out_file_name_prefix.to_str().unwrap_or(".");
         info!(
@@ -1584,6 +1598,13 @@ fn align_reads_paired_end<W: AlignmentWriter + ?Sized>(
                 if let Some(ref mut tw) = tr_writer {
                     tw.write_batch(&batch.transcriptome_records)?;
                 }
+                if params.chim_out_within_bam() {
+                    use crate::chimeric::build_within_bam_records;
+                    for chim_aln in &batch.chimeric_alns {
+                        let supp = build_within_bam_records(chim_aln, &index.genome, 255)?;
+                        writer.write_batch(&supp)?;
+                    }
+                }
                 if let Some(ref mut uw1) = unmapped_writer1 {
                     for (name, seq, qual) in &batch.unmapped_mate1 {
                         uw1.write_record(name, seq, qual)?;
@@ -1637,6 +1658,13 @@ fn align_reads_paired_end<W: AlignmentWriter + ?Sized>(
             if let Some(ref mut tw) = tr_writer {
                 tw.write_batch(&batch.transcriptome_records)?;
             }
+            if params.chim_out_within_bam() {
+                use crate::chimeric::build_within_bam_records;
+                for chim_aln in &batch.chimeric_alns {
+                    let supp = build_within_bam_records(chim_aln, &index.genome, 255)?;
+                    writer.write_batch(&supp)?;
+                }
+            }
             if let Some(ref mut uw1) = unmapped_writer1 {
                 for (name, seq, qual) in &batch.unmapped_mate1 {
                     uw1.write_record(name, seq, qual)?;
@@ -1655,7 +1683,7 @@ fn align_reads_paired_end<W: AlignmentWriter + ?Sized>(
         );
     }
 
-    // Flush chimeric output if enabled (currently no chimeric alignments from paired-end)
+    // Flush chimeric output if enabled
     if let Some(ref mut chim_writer) = chimeric_writer {
         chim_writer.flush()?;
     }

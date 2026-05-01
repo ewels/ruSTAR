@@ -1086,7 +1086,7 @@ fn build_md_tag(
 }
 
 /// Convert ruSTAR CigarOp to noodles Cigar
-fn convert_cigar(ops: &[CigarOp]) -> Result<sam::alignment::record_buf::Cigar, Error> {
+pub(crate) fn convert_cigar(ops: &[CigarOp]) -> Result<sam::alignment::record_buf::Cigar, Error> {
     use sam::alignment::record::cigar::op::Kind;
 
     let mut cigar = sam::alignment::record_buf::Cigar::default();
