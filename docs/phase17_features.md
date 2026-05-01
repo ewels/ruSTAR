@@ -2,7 +2,7 @@
 
 # Phase 17: Features + Polish
 
-**Status**: In Progress (17.1, 17.5, 17.8, 17.A, 17.B, 17.C, 17.D, 17.2, 17.3, 17.4, 17.6, 17.7, 17.11 complete)
+**Status**: In Progress (17.1, 17.5, 17.8, 17.A, 17.B, 17.C, 17.D, 17.2, 17.3, 17.4, 17.6, 17.7, 17.9, 17.11 complete)
 
 **Goal**: Production-ready features and quality-of-life improvements.
 
@@ -22,7 +22,7 @@
 | 17.6 | `--outStd SAM/BAM` (stdout output for piping) | ✅ Complete |
 | 17.7 | GTF tag parameters (`sjdbGTFchrPrefix`, etc.) | ✅ Complete |
 | 17.8 | `--quantMode GeneCounts` | ✅ Complete |
-| 17.9 | `--outBAMcompression` / `--limitBAMsortRAM` | Planned |
+| 17.9 | `--outBAMcompression` / `--limitBAMsortRAM` | ✅ Complete |
 | 17.10 | Chimeric Tier 3 (re-map soft-clipped regions) | Planned |
 | 17.11 | `--chimOutType WithinBAM` (supplementary FLAG 0x800) | ✅ Complete |
 | 17.12 | BySJout memory optimization (disk buffering for 100M+ reads) | Planned |
@@ -294,6 +294,35 @@ All 4 production paths thread params: `index/mod.rs` (genomeGenerate), `index/io
 **Files**: `src/params.rs`, `src/junction/gtf.rs`, `src/junction/mod.rs`, `src/quant/mod.rs`, `src/quant/transcriptome.rs`, `src/index/mod.rs`, `src/index/io.rs`, `src/lib.rs`
 
 **Result**: 379/379 tests, 0 clippy warnings.
+
+---
+
+## Phase 17.9: `--outBAMcompression` / `--limitBAMsortRAM` ✅ (2026-05-01)
+
+**Goal**: Control BGZF compression level for BAM output and cap memory usage during coordinate-sorted BAM buffering.
+
+**Parameters added** (`src/params.rs`):
+
+| Parameter | Default | Purpose |
+|-----------|---------|---------|
+| `--outBAMcompression` | `1` | BGZF compression level: -1/0=uncompressed, 1-8=flate2 levels, ≥9=BEST |
+| `--limitBAMsortRAM` | `0` | Max bytes for sorted BAM in-memory buffering; 0=unlimited |
+
+**Implementation** (`src/io/bam.rs`):
+
+- `bgzf_compression(level: i32) -> noodles::bgzf::writer::CompressionLevel` — maps: `≤0→NONE`, `≥9→BEST`, `1-8→try_from(u8)`.
+- `make_bgzf_writer<W: Write>(inner, compression) -> noodles::bgzf::Writer<W>` — uses `noodles::bgzf::writer::Builder::default().set_compression_level(...).build_from_writer(inner)`.
+- `SortedBamWriter` + `SortedBamStdoutWriter`: added `compression: i32` and `limit_bam_sort_ram: u64` fields.
+- `SortedBamWriter::estimated_ram()` → `records.len() as u64 * 400` (rough 400 bytes/record).
+- `SortedBamWriter::check_ram_limit()` → returns `Error::Alignment` if `limit > 0 && estimated > limit`.
+- `BamWriter::with_header(header, path, compression)` — 3rd arg; callers pass `params.out_bam_compression`.
+- All 4 BAM writers use `make_bgzf_writer` with the configured level.
+
+**Tests added** (3 new): `test_bam_compression_zero`, `test_bam_sort_ram_unlimited`, `test_bam_sort_ram_exceeded`.
+
+**Files**: `src/params.rs`, `src/io/bam.rs`
+
+**Result**: 382/382 tests, 0 clippy warnings.
 
 ---
 

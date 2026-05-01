@@ -351,6 +351,18 @@ pub struct Parameters {
     #[arg(long = "outSAMtype", num_args = 1..=2, default_values_t = vec!["SAM".to_string()])]
     pub out_sam_type_raw: Vec<String>,
 
+    /// BAM compression level: -1 = uncompressed, 1 (default) to 9 (maximum)
+    #[arg(
+        long = "outBAMcompression",
+        default_value_t = 1,
+        allow_hyphen_values = true
+    )]
+    pub out_bam_compression: i32,
+
+    /// Maximum RAM (bytes) for coordinate-sorted BAM. 0 = unlimited.
+    #[arg(long = "limitBAMsortRAM", default_value_t = 0)]
+    pub limit_bam_sort_ram: u64,
+
     /// Route primary alignment output to stdout instead of a file.
     /// Values: None (default), SAM, BAM_Unsorted, BAM_SortedByCoordinate.
     #[arg(long = "outStd", default_value = "None")]

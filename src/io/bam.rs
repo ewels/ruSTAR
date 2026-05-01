@@ -33,6 +33,25 @@ impl BufferedBamRecords {
     }
 }
 
+/// Convert STAR's `--outBAMcompression` integer (-1..9) to a noodles level.
+///
+/// STAR mapping: -1 or 0 = uncompressed, 1-9 = deflate levels, default 1.
+fn bgzf_compression(level: i32) -> noodles::bgzf::writer::CompressionLevel {
+    use noodles::bgzf::writer::CompressionLevel;
+    match level {
+        n if n <= 0 => CompressionLevel::NONE,
+        n if n >= 9 => CompressionLevel::BEST,
+        n => CompressionLevel::try_from(n as u8).unwrap_or_default(),
+    }
+}
+
+/// Create a BGZF writer with the given STAR compression level.
+fn make_bgzf_writer<W: std::io::Write>(inner: W, compression: i32) -> noodles::bgzf::Writer<W> {
+    noodles::bgzf::writer::Builder::default()
+        .set_compression_level(bgzf_compression(compression))
+        .build_from_writer(inner)
+}
+
 /// BAM file writer (streaming, unsorted)
 ///
 /// This writer streams BAM records directly to disk as they're generated,
@@ -51,6 +70,8 @@ pub struct SortedBamWriter {
     records: Vec<RecordBuf>,
     output_path: std::path::PathBuf,
     header: sam::Header,
+    compression: i32,
+    limit_bam_sort_ram: u64,
 }
 
 impl BamWriter {
@@ -61,14 +82,14 @@ impl BamWriter {
     /// (yeast tRNA transcripts like `tP(UGG)A`), which noodles' strict
     /// validator rejects. Writing the SAM text portion of the BAM header
     /// manually sidesteps that validation while preserving every other byte.
-    fn with_header(output_path: &Path, header: sam::Header) -> Result<Self, Error> {
+    fn with_header(
+        output_path: &Path,
+        header: sam::Header,
+        compression: i32,
+    ) -> Result<Self, Error> {
         let buf_writer = BufWriter::new(File::create(output_path)?);
-        // Wrap in BGZF *before* writing header bytes so the header lands in
-        // BGZF blocks just like noodles would write it.
-        let mut bgzf = noodles::bgzf::Writer::new(buf_writer);
+        let mut bgzf = make_bgzf_writer(buf_writer, compression);
         write_bam_header_lenient(&mut bgzf, &header, None)?;
-        // Reconstruct a bam::io::Writer on top of the already-BGZF-framed
-        // underlying stream so subsequent record writes use noodles.
         let writer = bam::io::Writer::from(bgzf);
         Ok(Self { writer, header })
     }
@@ -78,6 +99,7 @@ impl BamWriter {
         Self::with_header(
             output_path,
             crate::io::sam::build_sam_header(genome, params)?,
+            params.out_bam_compression,
         )
     }
 
@@ -97,6 +119,7 @@ impl BamWriter {
         Self::with_header(
             output_path,
             crate::io::sam::build_sam_header_from_refs(refs, params)?,
+            params.out_bam_compression,
         )
     }
 
@@ -131,6 +154,8 @@ impl SortedBamWriter {
             records: Vec::new(),
             output_path: output_path.to_path_buf(),
             header,
+            compression: params.out_bam_compression,
+            limit_bam_sort_ram: params.limit_bam_sort_ram,
         })
     }
 
@@ -140,21 +165,41 @@ impl SortedBamWriter {
         Ok(())
     }
 
+    /// Estimate memory used by buffered records (rough: 400 bytes/record for 150bp reads).
+    fn estimated_ram(&self) -> u64 {
+        self.records.len() as u64 * 400
+    }
+
+    fn check_ram_limit(&self) -> Result<(), Error> {
+        if self.limit_bam_sort_ram > 0 {
+            let est = self.estimated_ram();
+            if est > self.limit_bam_sort_ram {
+                return Err(Error::Alignment(format!(
+                    "limitBAMsortRAM={} bytes exceeded: estimated {} bytes for {} records. \
+                     Increase --limitBAMsortRAM or use --outSAMtype BAM Unsorted.",
+                    self.limit_bam_sort_ram,
+                    est,
+                    self.records.len()
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Sort all buffered records by coordinate and write a single sorted BAM.
     ///
     /// Sort key: (reference_sequence_id, alignment_start).
     /// Unmapped records (no reference) sort to the end.
     pub fn finish(&mut self) -> Result<(), Error> {
-        self.records.sort_by_key(|r| {
-            match (r.reference_sequence_id(), r.alignment_start()) {
+        self.check_ram_limit()?;
+        self.records
+            .sort_by_key(|r| match (r.reference_sequence_id(), r.alignment_start()) {
                 (Some(chr), Some(pos)) => (chr, pos.get()),
-                // Unmapped: sort last
                 _ => (usize::MAX, 0),
-            }
-        });
+            });
 
         let buf_writer = BufWriter::new(File::create(&self.output_path)?);
-        let mut bgzf = noodles::bgzf::Writer::new(buf_writer);
+        let mut bgzf = make_bgzf_writer(buf_writer, self.compression);
         write_bam_header_lenient(&mut bgzf, &self.header, Some("coordinate"))?;
         let mut bam_writer = bam::io::Writer::from(bgzf);
         for record in &self.records {
@@ -167,6 +212,7 @@ impl SortedBamWriter {
 
     /// Sort all buffered records and write to stdout (for `--outStd BAM_SortedByCoordinate`).
     pub fn finish_to_stdout(&mut self) -> Result<(), Error> {
+        self.check_ram_limit()?;
         self.records
             .sort_by_key(|r| match (r.reference_sequence_id(), r.alignment_start()) {
                 (Some(chr), Some(pos)) => (chr, pos.get()),
@@ -175,7 +221,7 @@ impl SortedBamWriter {
 
         let stdout = std::io::stdout();
         let buf_writer = BufWriter::new(stdout.lock());
-        let mut bgzf = noodles::bgzf::Writer::new(buf_writer);
+        let mut bgzf = make_bgzf_writer(buf_writer, self.compression);
         write_bam_header_lenient(&mut bgzf, &self.header, Some("coordinate"))?;
         let mut bam_writer = bam::io::Writer::from(bgzf);
         for record in &self.records {
@@ -334,7 +380,10 @@ pub struct BamStdoutWriter {
 impl BamStdoutWriter {
     pub fn create(genome: &crate::genome::Genome, params: &Parameters) -> Result<Self, Error> {
         let header = crate::io::sam::build_sam_header(genome, params)?;
-        let mut bgzf = noodles::bgzf::Writer::new(BufWriter::new(std::io::stdout()));
+        let mut bgzf = make_bgzf_writer(
+            BufWriter::new(std::io::stdout()),
+            params.out_bam_compression,
+        );
         write_bam_header_lenient(&mut bgzf, &header, None)?;
         let writer = bam::io::Writer::from(bgzf);
         Ok(Self { writer, header })
@@ -357,6 +406,8 @@ impl BamStdoutWriter {
 pub struct SortedBamStdoutWriter {
     records: Vec<RecordBuf>,
     header: sam::Header,
+    compression: i32,
+    limit_bam_sort_ram: u64,
 }
 
 impl SortedBamStdoutWriter {
@@ -365,6 +416,8 @@ impl SortedBamStdoutWriter {
         Ok(Self {
             records: Vec::new(),
             header,
+            compression: params.out_bam_compression,
+            limit_bam_sort_ram: params.limit_bam_sort_ram,
         })
     }
 
@@ -374,12 +427,23 @@ impl SortedBamStdoutWriter {
     }
 
     pub fn finish(&mut self) -> Result<(), Error> {
+        if self.limit_bam_sort_ram > 0 {
+            let est = self.records.len() as u64 * 400;
+            if est > self.limit_bam_sort_ram {
+                return Err(Error::Alignment(format!(
+                    "limitBAMsortRAM={} bytes exceeded: estimated {} bytes for {} records.",
+                    self.limit_bam_sort_ram,
+                    est,
+                    self.records.len()
+                )));
+            }
+        }
         self.records
             .sort_by_key(|r| match (r.reference_sequence_id(), r.alignment_start()) {
                 (Some(chr), Some(pos)) => (chr, pos.get()),
                 _ => (usize::MAX, 0),
             });
-        let mut bgzf = noodles::bgzf::Writer::new(BufWriter::new(std::io::stdout()));
+        let mut bgzf = make_bgzf_writer(BufWriter::new(std::io::stdout()), self.compression);
         write_bam_header_lenient(&mut bgzf, &self.header, Some("coordinate"))?;
         let mut bam_writer = bam::io::Writer::from(bgzf);
         for record in &self.records {
@@ -572,5 +636,48 @@ mod tests {
 
         let result = writer.finish();
         assert!(result.is_ok(), "Finishing BAM file should succeed");
+    }
+
+    #[test]
+    fn test_bam_compression_level_zero() {
+        let genome = create_test_genome();
+        let mut params = create_test_params();
+        params.out_bam_compression = 0;
+        let temp_file = NamedTempFile::new().unwrap();
+        let writer = BamWriter::create(temp_file.path(), &genome, &params);
+        assert!(
+            writer.is_ok(),
+            "BAM writer with compression=0 should succeed"
+        );
+    }
+
+    #[test]
+    fn test_sorted_bam_limit_ram_unlimited() {
+        let genome = create_test_genome();
+        let mut params = create_test_params();
+        params.limit_bam_sort_ram = 0; // unlimited
+        let temp_file = NamedTempFile::new().unwrap();
+        let mut writer = SortedBamWriter::create(temp_file.path(), &genome, &params).unwrap();
+        let result = writer.finish();
+        assert!(
+            result.is_ok(),
+            "Sorted BAM with unlimited RAM should succeed"
+        );
+    }
+
+    #[test]
+    fn test_sorted_bam_limit_ram_exceeded() {
+        let genome = create_test_genome();
+        let mut params = create_test_params();
+        params.limit_bam_sort_ram = 1; // 1 byte — will be exceeded by any records
+        let temp_file = NamedTempFile::new().unwrap();
+        let mut writer = SortedBamWriter::create(temp_file.path(), &genome, &params).unwrap();
+        // Add a record to trigger the limit
+        let rec =
+            crate::io::sam::SamWriter::build_unmapped_record("r1", &[0, 1, 2, 3], &[30; 4], None)
+                .unwrap();
+        writer.write_batch(&[rec]).unwrap();
+        let result = writer.finish();
+        assert!(result.is_err(), "Should fail when RAM limit is exceeded");
     }
 }
