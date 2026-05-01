@@ -59,17 +59,28 @@ impl SpliceJunctionDb {
         }
     }
 
-    /// Build junction database from GTF file
-    pub fn from_gtf(gtf_path: &Path, genome: &Genome) -> Result<Self, Error> {
+    /// Build junction database from GTF file with configurable GTF attribute names.
+    pub fn from_gtf_configured(
+        gtf_path: &Path,
+        genome: &Genome,
+        feature_exon: &str,
+        chr_prefix: &str,
+        transcript_tag: &str,
+    ) -> Result<Self, Error> {
         log::info!("Loading GTF annotations from: {}", gtf_path.display());
 
-        let exons = gtf::parse_gtf(gtf_path)?;
+        let exons = gtf::parse_gtf_configured(gtf_path, feature_exon, chr_prefix)?;
         log::debug!("Parsed {} exon features from GTF", exons.len());
 
-        let raw = gtf::extract_junctions_from_exons(exons, genome)?;
+        let raw = gtf::extract_junctions_configured(exons, genome, transcript_tag)?;
         log::info!("Extracted {} annotated junctions from GTF", raw.len());
 
         Ok(Self::from_raw_junctions(&raw))
+    }
+
+    /// Build junction database from GTF file (default STAR attribute names).
+    pub fn from_gtf(gtf_path: &Path, genome: &Genome) -> Result<Self, Error> {
+        Self::from_gtf_configured(gtf_path, genome, "exon", "", "transcript_id")
     }
 
     /// Build junction database from a pre-extracted list of annotated

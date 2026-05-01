@@ -144,8 +144,16 @@ fn compare_suffixes(
         let idx_a = start_a + offset;
         let idx_b = start_b + offset;
 
-        let byte_a = if idx_a < sequence.len() { sequence[idx_a] } else { 5 };
-        let byte_b = if idx_b < sequence.len() { sequence[idx_b] } else { 5 };
+        let byte_a = if idx_a < sequence.len() {
+            sequence[idx_a]
+        } else {
+            5
+        };
+        let byte_b = if idx_b < sequence.len() {
+            sequence[idx_b]
+        } else {
+            5
+        };
 
         // Stop at padding (value 5) - this is STAR's sentinel
         let is_padding_a = byte_a == 5;
@@ -157,8 +165,16 @@ fn compare_suffixes(
             // For yeast (gstrand_bit=32): FW entries have packed_value = pos (no bit 32),
             // RC entries have packed_value = pos | (1<<32). All FW entries therefore
             // sort before all RC entries, matching STAR's tie-breaking behavior.
-            let packed_a = if reverse_a { pos_a | (1usize << 32) } else { pos_a };
-            let packed_b = if reverse_b { pos_b | (1usize << 32) } else { pos_b };
+            let packed_a = if reverse_a {
+                pos_a | (1usize << 32)
+            } else {
+                pos_a
+            };
+            let packed_b = if reverse_b {
+                pos_b | (1usize << 32)
+            } else {
+                pos_b
+            };
             return packed_a.cmp(&packed_b);
         }
 
@@ -178,8 +194,16 @@ fn compare_suffixes(
     }
 
     // If we exhausted max_len, fall back to packed SA value comparison
-    let packed_a = if reverse_a { pos_a | (1usize << 32) } else { pos_a };
-    let packed_b = if reverse_b { pos_b | (1usize << 32) } else { pos_b };
+    let packed_a = if reverse_a {
+        pos_a | (1usize << 32)
+    } else {
+        pos_a
+    };
+    let packed_b = if reverse_b {
+        pos_b | (1usize << 32)
+    } else {
+        pos_b
+    };
     packed_a.cmp(&packed_b)
 }
 

@@ -56,17 +56,30 @@ impl GenomeIndex {
         {
             let n_genome_real = genome.n_genome;
 
-            let exons = crate::junction::gtf::parse_gtf(gtf_path)?;
+            let exons = crate::junction::gtf::parse_gtf_configured(
+                gtf_path,
+                &params.sjdb_gtf_feature_exon,
+                &params.sjdb_gtf_chr_prefix,
+            )?;
             log::debug!("Parsed {} exon features from GTF", exons.len());
 
-            let tr = TranscriptomeIndex::from_gtf_exons(&exons, &genome)?;
+            let tr = TranscriptomeIndex::from_gtf_exons_configured(
+                &exons,
+                &genome,
+                &params.sjdb_gtf_tag_exon_parent_transcript,
+                &params.sjdb_gtf_tag_exon_parent_gene,
+            )?;
             log::info!(
                 "Transcriptome index built from GTF: {} transcripts, {} genes",
                 tr.n_transcripts(),
                 tr.gene_ids.len()
             );
 
-            let raw = crate::junction::gtf::extract_junctions_from_exons(exons, &genome)?;
+            let raw = crate::junction::gtf::extract_junctions_configured(
+                exons,
+                &genome,
+                &params.sjdb_gtf_tag_exon_parent_transcript,
+            )?;
             log::info!("Extracted {} annotated junctions from GTF", raw.len());
             let jdb = SpliceJunctionDb::from_raw_junctions(&raw);
 

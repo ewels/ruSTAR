@@ -581,7 +581,6 @@ pub fn cluster_seeds(
         for bin in (old_end + 1)..=new_end {
             win_bin.entry((strand, bin)).or_insert(win_idx);
         }
-
     }
 
     // Phase 4: Assign ALL seeds to windows (matches STAR's stitchPieces Phase 3).
@@ -1885,9 +1884,7 @@ pub(crate) fn finalize_transcript(
     }
 
     // Guard: reverse-strand alignment must not extend past genome end
-    if cluster.is_reverse
-        && adjusted_genome_start + ref_len > index.genome.n_genome
-    {
+    if cluster.is_reverse && adjusted_genome_start + ref_len > index.genome.n_genome {
         return None;
     }
 

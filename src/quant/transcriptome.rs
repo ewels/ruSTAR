@@ -147,17 +147,21 @@ pub struct TranscriptomeIndex {
 }
 
 impl TranscriptomeIndex {
-    /// Build from already-parsed GTF exon records.
+    /// Build from already-parsed GTF exon records with configurable GTF attribute names.
     ///
-    /// Records are grouped by `transcript_id`.  Transcripts with inconsistent
-    /// strands / chromosomes are skipped with a warning.  Transcripts on
-    /// unknown chromosomes are skipped with a warning.
-    pub fn from_gtf_exons(exons: &[GtfRecord], genome: &Genome) -> Result<Self, Error> {
-        // Group exons by transcript_id, preserving first-seen insertion order.
+    /// `transcript_tag`: STAR `sjdbGTFtagExonParentTranscript` (default `"transcript_id"`).
+    /// `gene_tag`: STAR `sjdbGTFtagExonParentGene` (default `"gene_id"`).
+    pub fn from_gtf_exons_configured(
+        exons: &[GtfRecord],
+        genome: &Genome,
+        transcript_tag: &str,
+        gene_tag: &str,
+    ) -> Result<Self, Error> {
+        // Group exons by transcript_tag, preserving first-seen insertion order.
         let mut order: Vec<String> = Vec::new();
         let mut groups: HashMap<String, Vec<&GtfRecord>> = HashMap::new();
         for rec in exons {
-            let tid = match rec.attributes.get(GTF_ATTR_TRANSCRIPT_ID) {
+            let tid = match rec.attributes.get(transcript_tag) {
                 Some(id) => id.clone(),
                 None => continue,
             };
@@ -266,11 +270,7 @@ impl TranscriptomeIndex {
                 _ => 1u8, // unknown → treat as forward (STAR default)
             };
 
-            let gene_id = first
-                .attributes
-                .get(GTF_ATTR_GENE_ID)
-                .cloned()
-                .unwrap_or_default();
+            let gene_id = first.attributes.get(gene_tag).cloned().unwrap_or_default();
             // STAR-faithful fallbacks: when the GTF record omits gene_name,
             // STAR's GTF.cpp writes geneAttr[ig][0] = gene_id (not empty).
             // When gene_biotype is omitted, it writes `MISSING_GENE_TYPE`.
@@ -358,6 +358,11 @@ impl TranscriptomeIndex {
             tr_starts_sorted,
             tr_end_max_sorted,
         })
+    }
+
+    /// Build from already-parsed GTF exon records using default STAR attribute names.
+    pub fn from_gtf_exons(exons: &[GtfRecord], genome: &Genome) -> Result<Self, Error> {
+        Self::from_gtf_exons_configured(exons, genome, GTF_ATTR_TRANSCRIPT_ID, GTF_ATTR_GENE_ID)
     }
 
     /// Number of transcripts indexed.

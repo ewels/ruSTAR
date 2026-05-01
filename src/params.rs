@@ -595,6 +595,25 @@ pub struct Parameters {
     #[arg(long = "sjdbGTFfile")]
     pub sjdb_gtf_file: Option<PathBuf>,
 
+    /// Prefix to add to chromosome names from GTF file (e.g. "chr" when GTF uses bare numbers)
+    #[arg(long = "sjdbGTFchrPrefix", default_value = "")]
+    pub sjdb_gtf_chr_prefix: String,
+
+    /// Feature type in GTF file to be used as exons for transcript annotation
+    #[arg(long = "sjdbGTFfeatureExon", default_value = "exon")]
+    pub sjdb_gtf_feature_exon: String,
+
+    /// GTF attribute name for parent transcript ID of exon features
+    #[arg(
+        long = "sjdbGTFtagExonParentTranscript",
+        default_value = "transcript_id"
+    )]
+    pub sjdb_gtf_tag_exon_parent_transcript: String,
+
+    /// GTF attribute name for parent gene ID of exon features
+    #[arg(long = "sjdbGTFtagExonParentGene", default_value = "gene_id")]
+    pub sjdb_gtf_tag_exon_parent_gene: String,
+
     /// Overhang length for splice junction database
     #[arg(long = "sjdbOverhang", default_value_t = 100)]
     pub sjdb_overhang: u32,

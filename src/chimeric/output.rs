@@ -152,13 +152,21 @@ pub fn build_within_bam_records(
 }
 
 /// Format one SA tag entry: `chr,pos,strand,CIGAR,mapQ,NM;`
-fn format_sa_entry(seg: &ChimericSegment, chr_names: &[String], chr_starts: &[u64], mapq: u8) -> String {
+fn format_sa_entry(
+    seg: &ChimericSegment,
+    chr_names: &[String],
+    chr_starts: &[u64],
+    mapq: u8,
+) -> String {
     let chr = &chr_names[seg.chr_idx];
     let chr_start = chr_starts[seg.chr_idx];
     let pos = seg.genome_start - chr_start + 1; // 1-based per-chr
     let strand = if seg.is_reverse { '-' } else { '+' };
     let cigar = cigar_to_string(&seg.cigar);
-    format!("{},{},{},{},{},{};", chr, pos, strand, cigar, mapq, seg.n_mismatch)
+    format!(
+        "{},{},{},{},{},{};",
+        chr, pos, strand, cigar, mapq, seg.n_mismatch
+    )
 }
 
 /// Build one SAM record for a chimeric segment.
@@ -191,9 +199,10 @@ fn build_segment_record(
 
     let chr_start = genome.chr_start[seg.chr_idx];
     let pos = (seg.genome_start - chr_start + 1) as usize;
-    *record.alignment_start_mut() = Some(pos.try_into().map_err(|e| {
-        Error::Chimeric(format!("invalid chimeric position {}: {}", pos, e))
-    })?);
+    *record.alignment_start_mut() = Some(
+        pos.try_into()
+            .map_err(|e| Error::Chimeric(format!("invalid chimeric position {}: {}", pos, e)))?,
+    );
 
     *record.mapping_quality_mut() = MappingQuality::new(mapq);
 
@@ -466,7 +475,13 @@ mod tests {
             n_mismatch: 1,
         };
         let alignment = ChimericAlignment::new(
-            donor, acceptor, 0, 0, 0, vec![0u8; 100], "READ_001".to_string(),
+            donor,
+            acceptor,
+            0,
+            0,
+            0,
+            vec![0u8; 100],
+            "READ_001".to_string(),
         );
         let genome = make_genome_2chr();
         let records = build_within_bam_records(&alignment, &genome, 255).unwrap();
@@ -500,7 +515,13 @@ mod tests {
             n_mismatch: 1,
         };
         let alignment = ChimericAlignment::new(
-            donor, acceptor, 0, 0, 0, vec![0u8; 100], "READ_001".to_string(),
+            donor,
+            acceptor,
+            0,
+            0,
+            0,
+            vec![0u8; 100],
+            "READ_001".to_string(),
         );
         let genome = make_genome_2chr();
         let records = build_within_bam_records(&alignment, &genome, 255).unwrap();
@@ -508,8 +529,14 @@ mod tests {
         let donor_flags = records[0].flags();
         let acceptor_flags = records[1].flags();
 
-        assert!(!donor_flags.is_supplementary(), "donor must not be supplementary");
-        assert!(acceptor_flags.is_supplementary(), "acceptor must be supplementary (0x800)");
+        assert!(
+            !donor_flags.is_supplementary(),
+            "donor must not be supplementary"
+        );
+        assert!(
+            acceptor_flags.is_supplementary(),
+            "acceptor must be supplementary (0x800)"
+        );
     }
 
     #[test]
@@ -538,7 +565,13 @@ mod tests {
             n_mismatch: 1,
         };
         let alignment = ChimericAlignment::new(
-            donor, acceptor, 0, 0, 0, vec![0u8; 100], "READ_001".to_string(),
+            donor,
+            acceptor,
+            0,
+            0,
+            0,
+            vec![0u8; 100],
+            "READ_001".to_string(),
         );
         let genome = make_genome_2chr();
         let records = build_within_bam_records(&alignment, &genome, 255).unwrap();
@@ -548,14 +581,26 @@ mod tests {
         let donor_sa = records[0].data().get(&sa_tag).unwrap();
         let donor_sa_str = format!("{:?}", donor_sa);
         // SA tag: chr22,89,-,37M,255,1; (pos = 600-512+1=89, strand=-, nm=1)
-        assert!(donor_sa_str.contains("chr22"), "SA tag must name acceptor chr");
-        assert!(donor_sa_str.contains("89"), "SA tag must have per-chr position");
-        assert!(donor_sa_str.contains('-'), "SA tag must reflect reverse strand");
+        assert!(
+            donor_sa_str.contains("chr22"),
+            "SA tag must name acceptor chr"
+        );
+        assert!(
+            donor_sa_str.contains("89"),
+            "SA tag must have per-chr position"
+        );
+        assert!(
+            donor_sa_str.contains('-'),
+            "SA tag must reflect reverse strand"
+        );
 
         // Acceptor record's SA tag should point to donor
         let acceptor_sa = records[1].data().get(&sa_tag).unwrap();
         let acceptor_sa_str = format!("{:?}", acceptor_sa);
-        assert!(acceptor_sa_str.contains("chr9"), "SA tag must name donor chr");
+        assert!(
+            acceptor_sa_str.contains("chr9"),
+            "SA tag must name donor chr"
+        );
     }
 
     #[test]
@@ -583,14 +628,19 @@ mod tests {
             n_mismatch: 0,
         };
         let read_seq = vec![0u8; 100]; // 100 A bases
-        let alignment = ChimericAlignment::new(
-            donor, acceptor, 0, 0, 0, read_seq, "READ_001".to_string(),
-        );
+        let alignment =
+            ChimericAlignment::new(donor, acceptor, 0, 0, 0, read_seq, "READ_001".to_string());
         let genome = make_genome_2chr();
         let records = build_within_bam_records(&alignment, &genome, 255).unwrap();
 
         // Donor has sequence, acceptor has empty sequence (*)
-        assert!(!records[0].sequence().is_empty(), "donor record must have SEQ");
-        assert!(records[1].sequence().is_empty(), "supplementary record must have empty SEQ");
+        assert!(
+            !records[0].sequence().is_empty(),
+            "donor record must have SEQ"
+        );
+        assert!(
+            records[1].sequence().is_empty(),
+            "supplementary record must have empty SEQ"
+        );
     }
 }

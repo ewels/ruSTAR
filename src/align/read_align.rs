@@ -2,8 +2,8 @@
 use crate::align::score::{AlignmentScorer, SpliceMotif};
 use crate::align::seed::Seed;
 use crate::align::stitch::{
-    PE_SPACER_BASE, cluster_seeds, finalize_transcript, split_combined_wt,
-    stitch_seeds_core, stitch_seeds_with_jdb_debug,
+    PE_SPACER_BASE, cluster_seeds, finalize_transcript, split_combined_wt, stitch_seeds_core,
+    stitch_seeds_with_jdb_debug,
 };
 use crate::align::transcript::{Exon, Transcript};
 use crate::error::Error;
@@ -743,24 +743,20 @@ pub fn align_paired_read(
 
         let detector = ChimericDetector::new(params);
         if mate1_clusters.len() >= 2 {
-            pe_chimeric.extend(
-                detector.detect_from_multi_clusters(
-                    &mate1_clusters,
-                    mate1_seq,
-                    read_name,
-                    index,
-                )?,
-            );
+            pe_chimeric.extend(detector.detect_from_multi_clusters(
+                &mate1_clusters,
+                mate1_seq,
+                read_name,
+                index,
+            )?);
         }
         if mate2_clusters.len() >= 2 {
-            pe_chimeric.extend(
-                detector.detect_from_multi_clusters(
-                    &mate2_clusters,
-                    mate2_seq,
-                    read_name,
-                    index,
-                )?,
-            );
+            pe_chimeric.extend(detector.detect_from_multi_clusters(
+                &mate2_clusters,
+                mate2_seq,
+                read_name,
+                index,
+            )?);
         }
         pe_chimeric.retain(|c| {
             c.meets_min_segment_length(params.chim_segment_min)
@@ -790,7 +786,8 @@ pub fn align_paired_read(
         )?;
 
         for wt in &wts {
-            let split_result = split_combined_wt(wt, len1, len2, stitch_is_reverse, scorer.align_intron_min);
+            let split_result =
+                split_combined_wt(wt, len1, len2, stitch_is_reverse, scorer.align_intron_min);
             match split_result {
                 Some((m1_wt, m2_wt)) => {
                     let (m1_read_slice, m1_orig_rev, m2_read_slice, m2_orig_rev) =
@@ -1033,7 +1030,12 @@ pub fn align_paired_read(
 
     // Step 3: TooManyLoci check (post-dedup, matching STAR's ordering: multMapSelect → dedup → TooManyLoci).
     if joint_pairs.len() > params.out_filter_multimap_nmax as usize {
-        return Ok((Vec::new(), pe_chimeric, 0, Some(UnmappedReason::TooManyLoci)));
+        return Ok((
+            Vec::new(),
+            pe_chimeric,
+            0,
+            Some(UnmappedReason::TooManyLoci),
+        ));
     }
 
     joint_pairs.sort_by(|a, b| {
@@ -1076,12 +1078,8 @@ pub fn align_paired_read(
     // the transcript vecs.
     if params.chim_segment_min > 0 {
         use crate::chimeric::detect_inter_mate_chimeric;
-        let best_m1_chim = single_mate1_transcripts
-            .iter()
-            .max_by_key(|t| t.score);
-        let best_m2_chim = single_mate2_transcripts
-            .iter()
-            .max_by_key(|t| t.score);
+        let best_m1_chim = single_mate1_transcripts.iter().max_by_key(|t| t.score);
+        let best_m2_chim = single_mate2_transcripts.iter().max_by_key(|t| t.score);
         if let (Some(t1), Some(t2)) = (best_m1_chim, best_m2_chim)
             && let Some(chim) =
                 detect_inter_mate_chimeric(t1, t2, mate1_seq, read_name, params, index)

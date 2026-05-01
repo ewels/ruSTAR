@@ -161,21 +161,17 @@ impl SortedBamWriter {
             bam_writer.write_alignment_record(&self.header, record)?;
         }
         bam_writer.finish(&self.header)?;
-        log::info!(
-            "Sorted BAM written ({} records)",
-            self.records.len()
-        );
+        log::info!("Sorted BAM written ({} records)", self.records.len());
         Ok(())
     }
 
     /// Sort all buffered records and write to stdout (for `--outStd BAM_SortedByCoordinate`).
     pub fn finish_to_stdout(&mut self) -> Result<(), Error> {
-        self.records.sort_by_key(|r| {
-            match (r.reference_sequence_id(), r.alignment_start()) {
+        self.records
+            .sort_by_key(|r| match (r.reference_sequence_id(), r.alignment_start()) {
                 (Some(chr), Some(pos)) => (chr, pos.get()),
                 _ => (usize::MAX, 0),
-            }
-        });
+            });
 
         let stdout = std::io::stdout();
         let buf_writer = BufWriter::new(stdout.lock());
@@ -378,12 +374,11 @@ impl SortedBamStdoutWriter {
     }
 
     pub fn finish(&mut self) -> Result<(), Error> {
-        self.records.sort_by_key(|r| {
-            match (r.reference_sequence_id(), r.alignment_start()) {
+        self.records
+            .sort_by_key(|r| match (r.reference_sequence_id(), r.alignment_start()) {
                 (Some(chr), Some(pos)) => (chr, pos.get()),
                 _ => (usize::MAX, 0),
-            }
-        });
+            });
         let mut bgzf = noodles::bgzf::Writer::new(BufWriter::new(std::io::stdout()));
         write_bam_header_lenient(&mut bgzf, &self.header, Some("coordinate"))?;
         let mut bam_writer = bam::io::Writer::from(bgzf);

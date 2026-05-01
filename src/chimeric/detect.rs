@@ -370,7 +370,12 @@ mod tests {
         }
     }
 
-    fn make_transcript(chr_idx: usize, genome_start: u64, genome_end: u64, is_reverse: bool) -> Transcript {
+    fn make_transcript(
+        chr_idx: usize,
+        genome_start: u64,
+        genome_end: u64,
+        is_reverse: bool,
+    ) -> Transcript {
         let read_len = (genome_end - genome_start) as usize;
         Transcript {
             chr_idx,
@@ -533,16 +538,11 @@ mod tests {
     #[test]
     fn test_inter_mate_chimeric_concordant_returns_none() {
         // Normal FR pair on the same chromosome, close together → not chimeric
-        let params = Parameters::try_parse_from(vec![
-            "ruSTAR",
-            "--chimSegmentMin",
-            "10",
-        ])
-        .unwrap();
+        let params = Parameters::try_parse_from(vec!["ruSTAR", "--chimSegmentMin", "10"]).unwrap();
         let index = make_test_index();
 
-        let t1 = make_transcript(0, 10, 60, false);  // mate1 forward
-        let t2 = make_transcript(0, 80, 130, true);  // mate2 reverse, same chr, close
+        let t1 = make_transcript(0, 10, 60, false); // mate1 forward
+        let t2 = make_transcript(0, 80, 130, true); // mate2 reverse, same chr, close
         let read_seq = vec![0u8; 50];
 
         let result = detect_inter_mate_chimeric(&t1, &t2, &read_seq, "read1", &params, &index);
@@ -551,16 +551,11 @@ mod tests {
 
     #[test]
     fn test_inter_mate_chimeric_different_chromosomes() {
-        let params = Parameters::try_parse_from(vec![
-            "ruSTAR",
-            "--chimSegmentMin",
-            "10",
-        ])
-        .unwrap();
+        let params = Parameters::try_parse_from(vec!["ruSTAR", "--chimSegmentMin", "10"]).unwrap();
         let index = make_test_index();
 
-        let t1 = make_transcript(0, 10, 60, false);  // mate1 chr0
-        let t2 = make_transcript(1, 10, 60, true);   // mate2 chr1
+        let t1 = make_transcript(0, 10, 60, false); // mate1 chr0
+        let t2 = make_transcript(1, 10, 60, true); // mate2 chr1
         let read_seq = vec![0u8; 50];
 
         let result = detect_inter_mate_chimeric(&t1, &t2, &read_seq, "read1", &params, &index);
@@ -573,15 +568,10 @@ mod tests {
     #[test]
     fn test_inter_mate_chimeric_same_strand() {
         // Both mates forward on the same chromosome → chimeric (strand break)
-        let params = Parameters::try_parse_from(vec![
-            "ruSTAR",
-            "--chimSegmentMin",
-            "10",
-        ])
-        .unwrap();
+        let params = Parameters::try_parse_from(vec!["ruSTAR", "--chimSegmentMin", "10"]).unwrap();
         let index = make_test_index();
 
-        let t1 = make_transcript(0, 10, 60, false);  // mate1 forward
+        let t1 = make_transcript(0, 10, 60, false); // mate1 forward
         let t2 = make_transcript(0, 80, 130, false); // mate2 also forward (abnormal)
         let read_seq = vec![0u8; 50];
 
@@ -592,12 +582,7 @@ mod tests {
     #[test]
     fn test_inter_mate_chimeric_too_far() {
         // Opposite-strand pair but >1Mb apart → chimeric
-        let params = Parameters::try_parse_from(vec![
-            "ruSTAR",
-            "--chimSegmentMin",
-            "10",
-        ])
-        .unwrap();
+        let params = Parameters::try_parse_from(vec!["ruSTAR", "--chimSegmentMin", "10"]).unwrap();
         let index = make_test_index();
 
         // Use large positions — out-of-bounds for sequence but score.rs guards handle this
@@ -612,12 +597,7 @@ mod tests {
     #[test]
     fn test_inter_mate_chimeric_segment_too_short() {
         // chimSegmentMin=100 but segments are only 20bp → None
-        let params = Parameters::try_parse_from(vec![
-            "ruSTAR",
-            "--chimSegmentMin",
-            "100",
-        ])
-        .unwrap();
+        let params = Parameters::try_parse_from(vec!["ruSTAR", "--chimSegmentMin", "100"]).unwrap();
         let index = make_test_index();
 
         let t1 = make_transcript(0, 10, 30, false);
@@ -630,12 +610,7 @@ mod tests {
 
     #[test]
     fn test_inter_mate_chimeric_empty_exons_returns_none() {
-        let params = Parameters::try_parse_from(vec![
-            "ruSTAR",
-            "--chimSegmentMin",
-            "10",
-        ])
-        .unwrap();
+        let params = Parameters::try_parse_from(vec!["ruSTAR", "--chimSegmentMin", "10"]).unwrap();
         let index = make_test_index();
         let read_seq = vec![0u8; 50];
 

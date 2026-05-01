@@ -43,7 +43,13 @@ impl GenomeIndex {
 
         // Load GTF annotations if provided
         let junction_db = if let Some(ref gtf_path) = params.sjdb_gtf_file {
-            SpliceJunctionDb::from_gtf(gtf_path, &genome)?
+            SpliceJunctionDb::from_gtf_configured(
+                gtf_path,
+                &genome,
+                &params.sjdb_gtf_feature_exon,
+                &params.sjdb_gtf_chr_prefix,
+                &params.sjdb_gtf_tag_exon_parent_transcript,
+            )?
         } else {
             log::info!("No GTF file provided, all junctions will be novel");
             SpliceJunctionDb::empty()
@@ -70,8 +76,17 @@ impl GenomeIndex {
                 "transcriptInfo.tab not found in {}; re-parsing GTF at align time",
                 genome_dir.display()
             );
-            let exons = crate::junction::gtf::parse_gtf(gtf_path)?;
-            Some(TranscriptomeIndex::from_gtf_exons(&exons, &genome)?)
+            let exons = crate::junction::gtf::parse_gtf_configured(
+                gtf_path,
+                &params.sjdb_gtf_feature_exon,
+                &params.sjdb_gtf_chr_prefix,
+            )?;
+            Some(TranscriptomeIndex::from_gtf_exons_configured(
+                &exons,
+                &genome,
+                &params.sjdb_gtf_tag_exon_parent_transcript,
+                &params.sjdb_gtf_tag_exon_parent_gene,
+            )?)
         } else {
             None
         };

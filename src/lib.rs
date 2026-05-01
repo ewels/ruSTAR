@@ -200,7 +200,13 @@ fn align_reads(params: &Parameters) -> anyhow::Result<()> {
                 "quantMode GeneCounts: building gene annotation from {}",
                 gtf_path.display()
             );
-            let ctx = crate::quant::QuantContext::build(gtf_path, &index.genome)?;
+            let ctx = crate::quant::QuantContext::build(
+                gtf_path,
+                &index.genome,
+                &params.sjdb_gtf_feature_exon,
+                &params.sjdb_gtf_chr_prefix,
+                &params.sjdb_gtf_tag_exon_parent_gene,
+            )?;
             Some(std::sync::Arc::new(ctx))
         } else {
             None
@@ -304,9 +310,7 @@ fn run_single_pass(
     let is_paired = params.read_files_in.len() == 2;
     let mut unmapped_w1: Option<UnmappedFastqWriter> =
         if params.out_reads_unmapped == OutReadsUnmapped::Fastx {
-            let path = params
-                .out_file_name_prefix
-                .join("Unmapped.out.mate1");
+            let path = params.out_file_name_prefix.join("Unmapped.out.mate1");
             info!("Writing unmapped reads to {}", path.display());
             Some(UnmappedFastqWriter::create(&path)?)
         } else {
@@ -314,9 +318,7 @@ fn run_single_pass(
         };
     let mut unmapped_w2: Option<UnmappedFastqWriter> =
         if params.out_reads_unmapped == OutReadsUnmapped::Fastx && is_paired {
-            let path = params
-                .out_file_name_prefix
-                .join("Unmapped.out.mate2");
+            let path = params.out_file_name_prefix.join("Unmapped.out.mate2");
             info!("Writing unmapped mate2 reads to {}", path.display());
             Some(UnmappedFastqWriter::create(&path)?)
         } else {
@@ -363,8 +365,7 @@ fn run_single_pass(
                 Box::new(SamWriter::create(&output_path, &index.genome, params)?)
             }
             OutSamFormat::Bam => {
-                let sorted =
-                    out_type.sort_order == Some(OutSamSortOrder::SortedByCoordinate);
+                let sorted = out_type.sort_order == Some(OutSamSortOrder::SortedByCoordinate);
                 let output_path = if sorted {
                     params
                         .out_file_name_prefix
@@ -1344,8 +1345,16 @@ fn align_reads_paired_end<W: AlignmentWriter + ?Sized>(
                     }
                     let (um1, um2) = if write_unmapped_fastq {
                         (
-                            vec![(paired_read.mate1.name.clone(), m1_seq.clone(), m1_qual.clone())],
-                            vec![(paired_read.mate2.name.clone(), m2_seq.clone(), m2_qual.clone())],
+                            vec![(
+                                paired_read.mate1.name.clone(),
+                                m1_seq.clone(),
+                                m1_qual.clone(),
+                            )],
+                            vec![(
+                                paired_read.mate2.name.clone(),
+                                m2_seq.clone(),
+                                m2_qual.clone(),
+                            )],
                         )
                     } else {
                         (Vec::new(), Vec::new())
@@ -1564,8 +1573,16 @@ fn align_reads_paired_end<W: AlignmentWriter + ?Sized>(
                     let pair_unmapped = results.is_empty() || has_half_mapped;
                     if pair_unmapped {
                         (
-                            vec![(paired_read.mate1.name.clone(), m1_seq.clone(), m1_qual.clone())],
-                            vec![(paired_read.mate2.name.clone(), m2_seq.clone(), m2_qual.clone())],
+                            vec![(
+                                paired_read.mate1.name.clone(),
+                                m1_seq.clone(),
+                                m1_qual.clone(),
+                            )],
+                            vec![(
+                                paired_read.mate2.name.clone(),
+                                m2_seq.clone(),
+                                m2_qual.clone(),
+                            )],
                         )
                     } else {
                         (Vec::new(), Vec::new())

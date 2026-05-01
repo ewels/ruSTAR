@@ -27,10 +27,14 @@ impl UnmappedFastqWriter {
     /// `qual` is raw FASTQ quality bytes.
     pub fn write_record(&mut self, name: &str, seq: &[u8], qual: &[u8]) -> Result<(), Error> {
         self.writer.write_all(b"@").map_err(Error::from)?;
-        self.writer.write_all(name.as_bytes()).map_err(Error::from)?;
+        self.writer
+            .write_all(name.as_bytes())
+            .map_err(Error::from)?;
         self.writer.write_all(b"\n").map_err(Error::from)?;
         for &b in seq {
-            self.writer.write_all(&[decode_base(b)]).map_err(Error::from)?;
+            self.writer
+                .write_all(&[decode_base(b)])
+                .map_err(Error::from)?;
         }
         self.writer.write_all(b"\n+\n").map_err(Error::from)?;
         self.writer.write_all(qual).map_err(Error::from)?;
