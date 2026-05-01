@@ -210,8 +210,90 @@ fn genomic_distance(c1: &SeedCluster, c2: &SeedCluster) -> u64 {
     }
 }
 
+/// Detect inter-mate chimeric alignment from two single-mate transcripts.
+///
+/// Fires when mate1 and mate2 map to different chromosomes, opposite-orientation
+/// same-chromosome positions, or positions too far apart to be a normal PE pair.
+/// This is the primary PE-specific chimeric case (gene-fusion detection).
+pub fn detect_inter_mate_chimeric(
+    t1: &Transcript,
+    t2: &Transcript,
+    mate1_seq: &[u8],
+    read_name: &str,
+    params: &Parameters,
+    index: &GenomeIndex,
+) -> Option<ChimericAlignment> {
+    // Only fire if the pair is discordant (different chr, same strand (both FW or both RC =
+    // not FR orientation), or too far apart).
+    let is_inter_chr = t1.chr_idx != t2.chr_idx;
+    // FR pair expects t1.is_reverse=false (mate1 FW) and t2.is_reverse=true (mate2 RC).
+    // Chimeric if both same strand.
+    let same_strand = t1.is_reverse == t2.is_reverse;
+    let too_far = if t1.chr_idx == t2.chr_idx {
+        let left_end = t1.genome_end.min(t2.genome_end);
+        let right_start = t1.genome_start.max(t2.genome_start);
+        right_start > left_end && right_start - left_end > 1_000_000
+    } else {
+        false
+    };
+
+    if !is_inter_chr && !same_strand && !too_far {
+        return None;
+    }
+
+    if t1.exons.is_empty() || t2.exons.is_empty() {
+        return None;
+    }
+
+    // Convert transcripts to chimeric segments
+    let donor = transcript_to_segment(t1).ok()?;
+    let acceptor = transcript_to_segment(t2).ok()?;
+
+    if !donor.meets_min_length(params.chim_segment_min)
+        || !acceptor.meets_min_length(params.chim_segment_min)
+    {
+        return None;
+    }
+
+    // Junction type: non-canonical (0) for inter-chromosomal; try motif for same-chr
+    let junction_type = if is_inter_chr {
+        0
+    } else {
+        classify_junction_type(
+            &index.genome,
+            donor.chr_idx,
+            donor.genome_end,
+            donor.is_reverse,
+            acceptor.chr_idx,
+            acceptor.genome_start,
+            acceptor.is_reverse,
+        )
+    };
+
+    let (repeat_len_donor, repeat_len_acceptor) = calculate_repeat_length(
+        &index.genome,
+        donor.chr_idx,
+        donor.genome_end,
+        acceptor.chr_idx,
+        acceptor.genome_start,
+        20,
+    );
+
+    let chim = ChimericAlignment::new(
+        donor,
+        acceptor,
+        junction_type,
+        repeat_len_donor,
+        repeat_len_acceptor,
+        mate1_seq.to_vec(),
+        read_name.to_string(),
+    );
+
+    Some(chim)
+}
+
 /// Convert a transcript to a chimeric segment
-fn transcript_to_segment(transcript: &Transcript) -> Result<ChimericSegment, Error> {
+pub(crate) fn transcript_to_segment(transcript: &Transcript) -> Result<ChimericSegment, Error> {
     if transcript.exons.is_empty() {
         return Err(Error::Alignment(
             "Cannot convert empty transcript to segment".to_string(),
@@ -239,7 +321,79 @@ fn transcript_to_segment(transcript: &Transcript) -> Result<ChimericSegment, Err
 mod tests {
     use super::*;
     use crate::align::WindowAlignment;
+    use crate::align::transcript::{CigarOp, Exon, Transcript};
+    use crate::genome::Genome;
+    use crate::index::GenomeIndex;
+    use crate::index::packed_array::PackedArray;
+    use crate::index::sa_index::SaIndex;
+    use crate::index::suffix_array::SuffixArray;
+    use crate::junction::SpliceJunctionDb;
     use clap::Parser;
+
+    /// Minimal two-chromosome genome for chimeric tests.
+    /// Each chromosome has 200 bases of A (=0), padded to 256-byte bins.
+    fn make_test_genome() -> Genome {
+        let chr_len = 200u64;
+        let chr_pad = 256u64;
+        let n_genome = chr_pad * 2;
+        let sequence = vec![0u8; 2 * n_genome as usize];
+        Genome {
+            sequence,
+            n_genome,
+            n_chr_real: 2,
+            chr_name: vec!["chr0".to_string(), "chr1".to_string()],
+            chr_length: vec![chr_len, chr_len],
+            chr_start: vec![0, chr_pad, n_genome],
+        }
+    }
+
+    fn make_test_index() -> GenomeIndex {
+        let genome = make_test_genome();
+        let gstrand_bit = 32u32;
+        GenomeIndex {
+            genome,
+            suffix_array: SuffixArray {
+                data: PackedArray::new(33, 0),
+                gstrand_bit,
+                gstrand_mask: (1u64 << gstrand_bit) - 1,
+            },
+            sa_index: SaIndex {
+                nbases: 0,
+                genome_sa_index_start: vec![0],
+                data: PackedArray::new(35, 0),
+                word_length: 35,
+                gstrand_bit,
+            },
+            junction_db: SpliceJunctionDb::empty(),
+            transcriptome: None,
+            prepared_junctions: Vec::new(),
+        }
+    }
+
+    fn make_transcript(chr_idx: usize, genome_start: u64, genome_end: u64, is_reverse: bool) -> Transcript {
+        let read_len = (genome_end - genome_start) as usize;
+        Transcript {
+            chr_idx,
+            genome_start,
+            genome_end,
+            is_reverse,
+            exons: vec![Exon {
+                genome_start,
+                genome_end,
+                read_start: 0,
+                read_end: read_len,
+                i_frag: 0,
+            }],
+            cigar: vec![CigarOp::Match(read_len as u32)],
+            score: read_len as i32,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 0,
+            junction_motifs: vec![],
+            junction_annotated: vec![],
+            read_seq: vec![0u8; read_len],
+        }
+    }
 
     /// Helper to create a minimal SeedCluster for chimeric detection tests
     fn make_test_cluster(
@@ -336,5 +490,160 @@ mod tests {
         let c2 = make_test_cluster(0, 1200, 1300, false);
 
         assert!(!detector.is_chimeric_signature(&c1, &c2));
+    }
+
+    // --- transcript_to_segment tests ---
+
+    #[test]
+    fn test_transcript_to_segment_basic() {
+        let t = make_transcript(0, 1000, 1100, false);
+        let seg = transcript_to_segment(&t).unwrap();
+
+        assert_eq!(seg.chr_idx, 0);
+        assert_eq!(seg.genome_start, 1000);
+        assert_eq!(seg.genome_end, 1100);
+        assert!(!seg.is_reverse);
+        assert_eq!(seg.read_start, 0);
+        assert_eq!(seg.read_end, 100);
+        assert_eq!(seg.score, 100);
+    }
+
+    #[test]
+    fn test_transcript_to_segment_empty_returns_error() {
+        let t = Transcript {
+            chr_idx: 0,
+            genome_start: 0,
+            genome_end: 0,
+            is_reverse: false,
+            exons: vec![],
+            cigar: vec![],
+            score: 0,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 0,
+            junction_motifs: vec![],
+            junction_annotated: vec![],
+            read_seq: vec![],
+        };
+        assert!(transcript_to_segment(&t).is_err());
+    }
+
+    // --- detect_inter_mate_chimeric tests ---
+
+    #[test]
+    fn test_inter_mate_chimeric_concordant_returns_none() {
+        // Normal FR pair on the same chromosome, close together → not chimeric
+        let params = Parameters::try_parse_from(vec![
+            "ruSTAR",
+            "--chimSegmentMin",
+            "10",
+        ])
+        .unwrap();
+        let index = make_test_index();
+
+        let t1 = make_transcript(0, 10, 60, false);  // mate1 forward
+        let t2 = make_transcript(0, 80, 130, true);  // mate2 reverse, same chr, close
+        let read_seq = vec![0u8; 50];
+
+        let result = detect_inter_mate_chimeric(&t1, &t2, &read_seq, "read1", &params, &index);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_inter_mate_chimeric_different_chromosomes() {
+        let params = Parameters::try_parse_from(vec![
+            "ruSTAR",
+            "--chimSegmentMin",
+            "10",
+        ])
+        .unwrap();
+        let index = make_test_index();
+
+        let t1 = make_transcript(0, 10, 60, false);  // mate1 chr0
+        let t2 = make_transcript(1, 10, 60, true);   // mate2 chr1
+        let read_seq = vec![0u8; 50];
+
+        let result = detect_inter_mate_chimeric(&t1, &t2, &read_seq, "read1", &params, &index);
+        assert!(result.is_some());
+        let chim = result.unwrap();
+        // Donor is the mate with earlier read_start (both 0 here; donor is t1 by read_start tie)
+        assert_ne!(chim.donor.chr_idx, chim.acceptor.chr_idx);
+    }
+
+    #[test]
+    fn test_inter_mate_chimeric_same_strand() {
+        // Both mates forward on the same chromosome → chimeric (strand break)
+        let params = Parameters::try_parse_from(vec![
+            "ruSTAR",
+            "--chimSegmentMin",
+            "10",
+        ])
+        .unwrap();
+        let index = make_test_index();
+
+        let t1 = make_transcript(0, 10, 60, false);  // mate1 forward
+        let t2 = make_transcript(0, 80, 130, false); // mate2 also forward (abnormal)
+        let read_seq = vec![0u8; 50];
+
+        let result = detect_inter_mate_chimeric(&t1, &t2, &read_seq, "read1", &params, &index);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_inter_mate_chimeric_too_far() {
+        // Opposite-strand pair but >1Mb apart → chimeric
+        let params = Parameters::try_parse_from(vec![
+            "ruSTAR",
+            "--chimSegmentMin",
+            "10",
+        ])
+        .unwrap();
+        let index = make_test_index();
+
+        // Use large positions — out-of-bounds for sequence but score.rs guards handle this
+        let t1 = make_transcript(0, 10, 60, false);
+        let t2 = make_transcript(0, 2_000_000, 2_000_050, true);
+        let read_seq = vec![0u8; 50];
+
+        let result = detect_inter_mate_chimeric(&t1, &t2, &read_seq, "read1", &params, &index);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_inter_mate_chimeric_segment_too_short() {
+        // chimSegmentMin=100 but segments are only 20bp → None
+        let params = Parameters::try_parse_from(vec![
+            "ruSTAR",
+            "--chimSegmentMin",
+            "100",
+        ])
+        .unwrap();
+        let index = make_test_index();
+
+        let t1 = make_transcript(0, 10, 30, false);
+        let t2 = make_transcript(1, 10, 30, true);
+        let read_seq = vec![0u8; 20];
+
+        let result = detect_inter_mate_chimeric(&t1, &t2, &read_seq, "read1", &params, &index);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_inter_mate_chimeric_empty_exons_returns_none() {
+        let params = Parameters::try_parse_from(vec![
+            "ruSTAR",
+            "--chimSegmentMin",
+            "10",
+        ])
+        .unwrap();
+        let index = make_test_index();
+        let read_seq = vec![0u8; 50];
+
+        let t1 = make_transcript(0, 10, 60, false);
+        let mut t2 = make_transcript(1, 10, 60, true);
+        t2.exons.clear();
+
+        let result = detect_inter_mate_chimeric(&t1, &t2, &read_seq, "read1", &params, &index);
+        assert!(result.is_none());
     }
 }

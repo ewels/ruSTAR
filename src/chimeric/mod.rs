@@ -14,7 +14,7 @@ mod output;
 mod score;
 mod segment;
 
-pub use detect::ChimericDetector;
+pub use detect::{ChimericDetector, detect_inter_mate_chimeric};
 pub use output::ChimericJunctionWriter;
 pub use segment::{ChimericAlignment, ChimericSegment};
 

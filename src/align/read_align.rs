@@ -625,6 +625,13 @@ pub fn align_read(
     ))
 }
 
+type PairedAlignResult = (
+    Vec<PairedAlignmentResult>,
+    Vec<crate::chimeric::ChimericAlignment>,
+    usize,
+    Option<UnmappedReason>,
+);
+
 /// Align paired-end reads using STAR's combined-read approach.
 ///
 /// # Algorithm
@@ -650,7 +657,7 @@ pub fn align_paired_read(
     read_name: &str,
     index: &GenomeIndex,
     params: &Parameters,
-) -> Result<(Vec<PairedAlignmentResult>, usize, Option<UnmappedReason>), Error> {
+) -> Result<PairedAlignResult, Error> {
     let len1 = mate1_seq.len();
     let len2 = mate2_seq.len();
 
@@ -708,6 +715,58 @@ pub fn align_paired_read(
 
     // Cluster combined seeds using the combined read length
     let clusters = cluster_seeds(&combined_seeds, index, params, combined_len, debug_pe);
+
+    // PE chimeric pre-pass: intra-mate multi-cluster detection (Tier 2).
+    // Split clusters by mate_id and run per-mate chimeric detection, mirroring SE behavior.
+    let mut pe_chimeric: Vec<crate::chimeric::ChimericAlignment> = Vec::new();
+    if params.chim_segment_min > 0 && clusters.len() >= 2 {
+        use crate::chimeric::ChimericDetector;
+
+        let mate1_clusters: Vec<_> = clusters
+            .iter()
+            .filter(|c| c.alignments.iter().all(|wa| wa.mate_id == 0))
+            .cloned()
+            .collect();
+
+        // Mate2 clusters: adjust read_pos to be relative to mate2_seq (subtract len1+1)
+        let mate2_clusters: Vec<_> = clusters
+            .iter()
+            .filter(|c| c.alignments.iter().all(|wa| wa.mate_id == 1))
+            .map(|c| {
+                let mut c2 = c.clone();
+                for wa in &mut c2.alignments {
+                    wa.read_pos -= len1 + 1;
+                }
+                c2
+            })
+            .collect();
+
+        let detector = ChimericDetector::new(params);
+        if mate1_clusters.len() >= 2 {
+            pe_chimeric.extend(
+                detector.detect_from_multi_clusters(
+                    &mate1_clusters,
+                    mate1_seq,
+                    read_name,
+                    index,
+                )?,
+            );
+        }
+        if mate2_clusters.len() >= 2 {
+            pe_chimeric.extend(
+                detector.detect_from_multi_clusters(
+                    &mate2_clusters,
+                    mate2_seq,
+                    read_name,
+                    index,
+                )?,
+            );
+        }
+        pe_chimeric.retain(|c| {
+            c.meets_min_segment_length(params.chim_segment_min)
+                && c.meets_min_score(params.chim_score_min)
+        });
+    }
 
     // Combined score threshold: use len1+len2 as denominator
     let combined_score_threshold =
@@ -974,7 +1033,7 @@ pub fn align_paired_read(
 
     // Step 3: TooManyLoci check (post-dedup, matching STAR's ordering: multMapSelect → dedup → TooManyLoci).
     if joint_pairs.len() > params.out_filter_multimap_nmax as usize {
-        return Ok((Vec::new(), 0, Some(UnmappedReason::TooManyLoci)));
+        return Ok((Vec::new(), pe_chimeric, 0, Some(UnmappedReason::TooManyLoci)));
     }
 
     joint_pairs.sort_by(|a, b| {
@@ -1009,7 +1068,26 @@ pub fn align_paired_read(
             .into_iter()
             .map(|pa| PairedAlignmentResult::BothMapped(Box::new(pa)))
             .collect();
-        return Ok((results, pe_mapq_n, None));
+        return Ok((results, pe_chimeric, pe_mapq_n, None));
+    }
+
+    // Inter-mate chimeric detection: fires when the best single-mate transcripts are discordant
+    // (different chr, same strand, or >1Mb apart). Runs before half-mapped fallback consumes
+    // the transcript vecs.
+    if params.chim_segment_min > 0 {
+        use crate::chimeric::detect_inter_mate_chimeric;
+        let best_m1_chim = single_mate1_transcripts
+            .iter()
+            .max_by_key(|t| t.score);
+        let best_m2_chim = single_mate2_transcripts
+            .iter()
+            .max_by_key(|t| t.score);
+        if let (Some(t1), Some(t2)) = (best_m1_chim, best_m2_chim)
+            && let Some(chim) =
+                detect_inter_mate_chimeric(t1, t2, mate1_seq, read_name, params, index)
+        {
+            pe_chimeric.push(chim);
+        }
     }
 
     // Half-mapped fallback: report the best-scoring single-mate transcript.
@@ -1032,6 +1110,7 @@ pub fn align_paired_read(
                 mapped_transcript: t1,
                 mate1_is_mapped: true,
             }],
+            pe_chimeric,
             1,
             None,
         )),
@@ -1040,6 +1119,7 @@ pub fn align_paired_read(
                 mapped_transcript: t2,
                 mate1_is_mapped: false,
             }],
+            pe_chimeric,
             1,
             None,
         )),
@@ -1052,6 +1132,7 @@ pub fn align_paired_read(
                         mapped_transcript: t1,
                         mate1_is_mapped: true,
                     }],
+                    pe_chimeric,
                     1,
                     None,
                 ))
@@ -1061,12 +1142,13 @@ pub fn align_paired_read(
                         mapped_transcript: t2,
                         mate1_is_mapped: false,
                     }],
+                    pe_chimeric,
                     1,
                     None,
                 ))
             }
         }
-        (None, None) => Ok((Vec::new(), 0, Some(UnmappedReason::TooShort))),
+        (None, None) => Ok((Vec::new(), pe_chimeric, 0, Some(UnmappedReason::TooShort))),
     }
 }
 
@@ -1482,7 +1564,7 @@ mod tests {
 
         let result = align_paired_read(&mate1, &mate2, "test", &index, &params);
         assert!(result.is_ok());
-        let (paired_alns, n_for_mapq, unmapped_reason) = result.unwrap();
+        let (paired_alns, _chimeric, n_for_mapq, unmapped_reason) = result.unwrap();
         assert_eq!(paired_alns.len(), 0);
         assert_eq!(n_for_mapq, 0);
         assert!(unmapped_reason.is_some());
@@ -1894,7 +1976,7 @@ mod tests {
         let mate1 = vec![4, 4, 4, 4, 4, 4, 4, 4];
         let mate2 = vec![4, 4, 4, 4, 4, 4, 4, 4];
 
-        let (results, n_for_mapq, unmapped_reason) =
+        let (results, _chimeric, n_for_mapq, unmapped_reason) =
             align_paired_read(&mate1, &mate2, "test", &index, &params).unwrap();
         assert!(results.is_empty(), "Both unmapped should return empty Vec");
         assert_eq!(n_for_mapq, 0);

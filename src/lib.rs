@@ -1222,12 +1222,12 @@ fn align_reads_paired_end<W: AlignmentWriter + ?Sized>(
         params.read_files_command.as_deref(),
     )?;
 
-    // Create chimeric output writer if enabled (paired-end chimeric detection not yet implemented)
+    // Create chimeric output writer if enabled
     let mut chimeric_writer = if params.chim_segment_min > 0 {
         use crate::chimeric::ChimericJunctionWriter;
         let prefix = params.out_file_name_prefix.to_str().unwrap_or(".");
         info!(
-            "Chimeric detection enabled (chimSegmentMin={}) - paired-end chimeric detection not yet implemented",
+            "Chimeric detection enabled (chimSegmentMin={})",
             params.chim_segment_min
         );
         Some(ChimericJunctionWriter::new(prefix)?)
@@ -1347,7 +1347,7 @@ fn align_reads_paired_end<W: AlignmentWriter + ?Sized>(
                 }
 
                 // Align paired read (CPU-intensive)
-                let (results, n_for_mapq, unmapped_reason) =
+                let (results, pe_chimeric, n_for_mapq, unmapped_reason) =
                     align_paired_read(&m1_seq, &m2_seq, &paired_read.name, &index, params)?;
 
                 // Classify the result for stats and SAM output
@@ -1562,7 +1562,7 @@ fn align_reads_paired_end<W: AlignmentWriter + ?Sized>(
 
                 Ok(AlignmentBatchResults {
                     sam_records: buffer,
-                    chimeric_alns: Vec::new(),
+                    chimeric_alns: pe_chimeric,
                     primary_junction_keys,
                     transcriptome_records,
                     unmapped_mate1,
