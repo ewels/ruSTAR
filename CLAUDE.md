@@ -90,7 +90,7 @@ src/
 
 ## Key Conventions
 
-- **Crate name is `ruSTAR`** — `#![allow(non_snake_case)]` in lib.rs suppresses the crate name warning
+- **Crate/binary name is `rustar-aligner`** — lib name in Rust is `rustar_aligner`; `#![allow(non_snake_case)]` in lib.rs is retained for STAR-style camelCase identifiers
 - **STAR params use `--camelCase` naming** — clap `#[arg(long = "camelCase")]` maps to snake_case Rust fields
 - **Multi-value params** (genomeFastaFiles, readFilesIn, outSAMtype, outSAMattributes, chimOutType, alignSJstitchMismatchNmax, outSJfilterIntronMaxVsReadN) need explicit `num_args`
 - **Negative defaults** (scoreGapNoncan=-8, readMapNumber=-1, etc.) need `allow_hyphen_values = true`

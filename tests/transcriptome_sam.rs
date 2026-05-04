@@ -154,7 +154,7 @@ fn transcriptome_sam_end_to_end_smoke_test() {
 
     // Build genome index, passing the GTF so transcriptInfo.tab + friends
     // are persisted (matches STAR's workflow).
-    Command::cargo_bin("ruSTAR")
+    Command::cargo_bin("rustar-aligner")
         .unwrap()
         .args([
             "--runMode",
@@ -172,7 +172,7 @@ fn transcriptome_sam_end_to_end_smoke_test() {
         .success();
 
     // Run alignment with --quantMode TranscriptomeSAM.
-    Command::cargo_bin("ruSTAR")
+    Command::cargo_bin("rustar-aligner")
         .unwrap()
         .args([
             "--runMode",

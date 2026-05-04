@@ -94,7 +94,7 @@ fn write_gtf(dir: &TempDir) -> PathBuf {
 /// If `gtf` is `Some`, passes `--sjdbGTFfile` + `--sjdbOverhang`.
 fn build_index(fasta: &Path, genome_dir: &Path, sa_nbases: &str, gtf: Option<&Path>) {
     fs::create_dir_all(genome_dir).unwrap();
-    let mut cmd = Command::cargo_bin("ruSTAR").unwrap();
+    let mut cmd = Command::cargo_bin("rustar-aligner").unwrap();
     cmd.arg("--runMode")
         .arg("genomeGenerate")
         .arg("--genomeDir")
@@ -164,7 +164,7 @@ fn test_bam_unsorted_output() {
     fs::create_dir_all(&output_dir).unwrap();
     let prefix = format!("{}/", output_dir.display());
 
-    Command::cargo_bin("ruSTAR")
+    Command::cargo_bin("rustar-aligner")
         .unwrap()
         .args([
             "--runMode",
@@ -228,7 +228,7 @@ fn test_bam_sorted_output() {
     fs::create_dir_all(&output_dir).unwrap();
     let prefix = format!("{}/", output_dir.display());
 
-    Command::cargo_bin("ruSTAR")
+    Command::cargo_bin("rustar-aligner")
         .unwrap()
         .args([
             "--runMode",
@@ -331,7 +331,7 @@ fn test_paired_end_alignment() {
     fs::create_dir_all(&output_dir).unwrap();
     let prefix = format!("{}/", output_dir.display());
 
-    Command::cargo_bin("ruSTAR")
+    Command::cargo_bin("rustar-aligner")
         .unwrap()
         .args([
             "--runMode",
@@ -408,7 +408,7 @@ fn test_spliced_alignment() {
     fs::create_dir_all(&output_dir).unwrap();
     let prefix = format!("{}/", output_dir.display());
 
-    Command::cargo_bin("ruSTAR")
+    Command::cargo_bin("rustar-aligner")
         .unwrap()
         .args([
             "--runMode",
@@ -509,7 +509,7 @@ fn test_bysj_filtering() {
     fs::create_dir_all(&output_dir).unwrap();
     let prefix = format!("{}/", output_dir.display());
 
-    let output = Command::cargo_bin("ruSTAR")
+    let output = Command::cargo_bin("rustar-aligner")
         .unwrap()
         .args([
             "--runMode",
@@ -600,7 +600,7 @@ fn test_gene_counts_output() {
     fs::create_dir_all(&output_dir).unwrap();
     let prefix = format!("{}/", output_dir.display());
 
-    Command::cargo_bin("ruSTAR")
+    Command::cargo_bin("rustar-aligner")
         .unwrap()
         .args([
             "--runMode",
@@ -692,7 +692,7 @@ fn test_unmapped_reads_output() {
     fs::create_dir_all(&output_dir).unwrap();
     let prefix = format!("{}/", output_dir.display());
 
-    Command::cargo_bin("ruSTAR")
+    Command::cargo_bin("rustar-aligner")
         .unwrap()
         .args([
             "--runMode",
@@ -757,7 +757,7 @@ fn test_two_pass_mode() {
     fs::create_dir_all(&output_dir).unwrap();
     let prefix = format!("{}/", output_dir.display());
 
-    Command::cargo_bin("ruSTAR")
+    Command::cargo_bin("rustar-aligner")
         .unwrap()
         .args([
             "--runMode",
