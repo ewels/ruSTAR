@@ -2,7 +2,7 @@
 
 # Phase 17: Features + Polish
 
-**Status**: In Progress (17.1, 17.5, 17.8, 17.A, 17.B, 17.C, 17.D, 17.2, 17.3, 17.4, 17.6, 17.7, 17.9, 17.11, 17.12, 17.13 complete)
+**Status**: In Progress (17.1, 17.5, 17.8, 17.A, 17.B, 17.C, 17.D, 17.2, 17.3, 17.4, 17.6, 17.7, 17.9, 17.10, 17.11, 17.12, 17.13 complete)
 
 **Goal**: Production-ready features and quality-of-life improvements.
 
@@ -23,7 +23,7 @@
 | 17.7 | GTF tag parameters (`sjdbGTFchrPrefix`, etc.) | ✅ Complete |
 | 17.8 | `--quantMode GeneCounts` | ✅ Complete |
 | 17.9 | `--outBAMcompression` / `--limitBAMsortRAM` | ✅ Complete |
-| 17.10 | Chimeric Tier 3 (re-map soft-clipped regions) | Planned |
+| 17.10 | Chimeric Tier 3 (re-map soft-clipped regions) | ✅ Complete |
 | 17.11 | `--chimOutType WithinBAM` (supplementary FLAG 0x800) | ✅ Complete |
 | 17.12 | BySJout memory optimization (disk buffering for 100M+ reads) | ✅ Complete |
 | 17.13 | Integration tests for Phase 17 features (8 tests, synthetic 20kb genome) | ✅ Complete |
@@ -378,6 +378,35 @@ All 4 production paths thread params: `index/mod.rs` (genomeGenerate), `index/io
 6. `test_gene_counts_output` — `ReadsPerGene.out.tab` written with correct columns
 7. `test_unmapped_reads_output` — `--outReadsUnmapped Fastx` writes Unmapped.out.mate1
 8. `test_two_pass_mode` — two-pass alignment runs without error
+
+---
+
+## Phase 12.2: SE Chimeric Tier 1b — Soft-Clip Re-mapping ✅ (2026-05-04)
+
+**Goal**: When `detect_chimeric_old` finds no chimeric partner in the existing transcript pool, re-seed the primary alignment's soft-clipped bases to find a chimeric partner de novo.
+
+**Implementation** (`src/chimeric/detect.rs`):
+
+- `ChimericDetector::detect_from_soft_clips` — extracts right/left soft-clip sub-sequence from `read_seq`, runs `Seed::find_seeds` → `cluster_seeds` → `stitch_seeds_with_jdb`, adjusts exon read positions for right clips (adds `clip_start` offset), then applies the same score/overhang/geometry filters as `detect_chimeric_old`.
+- `adjust_read_positions(tr, offset)` helper — shifts all exon `read_start`/`read_end` by `offset` for sub-sequence stitching results.
+- Called as Step 3c in `src/align/read_align.rs`, only when `chimeric_alignments.is_empty()` after Step 3b.
+
+**Result**: 396/396 tests, 0 clippy warnings.
+
+---
+
+## Phase 17.10: Chimeric Tier 3 — Residual Re-mapping ✅ (2026-05-04)
+
+**Goal**: After any chimeric pair is found (by Tier 1 or 2), re-seed the outer read regions not covered by either segment to detect multi-junction gene fusions (3-way chimeras).
+
+**Implementation** (`src/chimeric/detect.rs`):
+
+- `ChimericDetector::detect_from_chimeric_residuals` — computes `left_covered = min(donor.read_start, acceptor.read_start)` and `right_covered = max(donor.read_end, acceptor.read_end)`; for each outer span >= `chimSegmentMin`, re-seeds the uncovered sub-sequence and pairs the result with the adjacent chimeric segment using the same score/overhang/geometry filters.
+- Called as Step 3d in `src/align/read_align.rs` on each element of `chimeric_alignments` after Steps 3b and 3c; results are appended to `chimeric_alignments`.
+
+**Chimeric pipeline is now 4-tier**: Tier 1 (transcript-pair search) → Tier 2 (multi-cluster) → Tier 1b (primary soft-clip re-seed) → Tier 3 (residual outer re-seed).
+
+**Result**: 396/396 tests, 0 clippy warnings.
 
 ---
 

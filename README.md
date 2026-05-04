@@ -6,7 +6,7 @@ A Rust reimplementation of [STAR](https://github.com/alexdobin/STAR) (Spliced Tr
 
 ruSTAR aims to be a faithful port of STAR, matching the original behavior as closely as possible. It uses the same genome index format, accepts the same `--camelCase` command-line parameters, and produces compatible SAM/BAM output.
 
-**Current status**: End-to-end single-end and paired-end RNA-seq alignment with splice junction detection, two-pass mode, chimeric alignment detection, gene-level quantification, and multi-threaded parallel processing. 364 tests passing (359 unit + 5 integration), 0 clippy warnings.
+**Current status**: End-to-end single-end and paired-end RNA-seq alignment with splice junction detection, two-pass mode, chimeric alignment detection (including multi-junction Tier 3), gene-level quantification, and multi-threaded parallel processing. 396 tests passing (383 unit + 8 integration + others), 0 clippy warnings.
 
 ## Quick Start
 
@@ -127,7 +127,7 @@ Benchmarked on 10,000 yeast RNA-seq reads (150 bp, ERR12389696), compared to STA
 - GTF-based junction annotation with scoring bonus (`--sjdbGTFfile`)
 - Two-pass mode for novel junction discovery (`--twopassMode Basic`)
 - SJDB insertion into genome index at genomeGenerate time
-- Chimeric alignment detection for single-end reads (`--chimSegmentMin`)
+- Chimeric alignment detection — SE and PE, 4-tier pipeline: transcript-pair search, multi-cluster, soft-clip re-seeding, residual outer re-seeding for multi-junction fusions (`--chimSegmentMin`)
 - Gene-level read counting (`--quantMode GeneCounts` → `ReadsPerGene.out.tab`)
 - Transcriptome-coordinate SAM output (`--quantMode TranscriptomeSAM`)
 - Post-alignment read filtering (`--outFilterType BySJout`)
@@ -146,9 +146,7 @@ Benchmarked on 10,000 yeast RNA-seq reads (150 bp, ERR12389696), compared to STA
 
 ## Known Limitations
 
-- No paired-end chimeric detection
-- No `--outStd SAM/BAM` (stdout streaming)
-- No STARsolo single-cell features
+- No STARsolo single-cell features (Phase 14, deferred)
 
 See [ROADMAP.md](ROADMAP.md) for detailed implementation tracking.
 
