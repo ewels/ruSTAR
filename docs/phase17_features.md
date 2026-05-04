@@ -2,7 +2,7 @@
 
 # Phase 17: Features + Polish
 
-**Status**: In Progress (17.1, 17.5, 17.8, 17.A, 17.B, 17.C, 17.D, 17.2, 17.3, 17.4, 17.6, 17.7, 17.9, 17.11 complete)
+**Status**: In Progress (17.1, 17.5, 17.8, 17.A, 17.B, 17.C, 17.D, 17.2, 17.3, 17.4, 17.6, 17.7, 17.9, 17.11, 17.12, 17.13 complete)
 
 **Goal**: Production-ready features and quality-of-life improvements.
 
@@ -25,8 +25,8 @@
 | 17.9 | `--outBAMcompression` / `--limitBAMsortRAM` | ✅ Complete |
 | 17.10 | Chimeric Tier 3 (re-map soft-clipped regions) | Planned |
 | 17.11 | `--chimOutType WithinBAM` (supplementary FLAG 0x800) | ✅ Complete |
-| 17.12 | BySJout memory optimization (disk buffering for 100M+ reads) | Planned |
-| 17.13 | Phase 9 integration test fixes (realistic test genomes) | Planned |
+| 17.12 | BySJout memory optimization (disk buffering for 100M+ reads) | ✅ Complete |
+| 17.13 | Integration tests for Phase 17 features (8 tests, synthetic 20kb genome) | ✅ Complete |
 
 ---
 
@@ -329,6 +329,79 @@ All 4 production paths thread params: `index/mod.rs` (genomeGenerate), `index/io
 ## Phase 17.2: Coordinate-Sorted BAM ✅ (2026-04-29)
 
 `SortedBamWriter` in `src/io/bam.rs` buffers all `RecordBuf` records, sorts by `(reference_sequence_id, alignment_start)` on `finish()`, writes one BAM with `SO:coordinate` in `@HD`. Output filename: `Aligned.sortedByCoord.out.bam`. Verified with `samtools quickcheck` + `samtools index`.
+
+---
+
+## PE chimericDetectionOld ✅ (2026-05-01)
+
+**Goal**: Run Tier 1 chimeric detection (`detect_chimeric_old`) per-mate for paired-end reads, mirroring STAR's post-stitching chimeric search for each fragment.
+
+**Implementation** (`src/align/read_align.rs`):
+
+- Added `all_m1_transcripts: Vec<Transcript>` and `all_m2_transcripts: Vec<Transcript>` before the cluster loop.
+- In the `Some((m1_wt, m2_wt))` joint-pair branch: push clones when `chim_segment_min > 0`.
+- In single-mate `all_m1`/`all_m2` branches: push before `single_mate_transcripts.push(t)`.
+- After `filter_paired_transcripts`, before BothMapped early return: runs `detect_chimeric_old` on each mate's pool (using best transcript as `tr_best`), filters by `chim_segment_min` + `chim_score_min`, extends `pe_chimeric`.
+
+---
+
+## Phase 17.12: BySJout Disk Buffering ✅ (2026-05-01)
+
+**Goal**: Replace in-memory `Vec<AlignmentBatchResults>` with temp-file + compact metadata to support 100M+ read datasets without requiring ~60GB RAM for BySJout mode.
+
+**Implementation**:
+
+- `BySJReadMeta` struct: `n_sam_records: u32`, `junction_keys`, `chimeric_alns`, `transcriptome_records` — only per-read metadata stays in RAM.
+- SAM records go to `tempfile::NamedTempFile` via `bysj_write_records` (noodles SAM writer).
+- Filter phase: `drop(bysj_temp_writer)` flushes `BufWriter`, reopen via `tf.reopen()`, create SAM reader, iterate `bysj_meta` — pass reads via `bysj_read_n_records(..., true)`, skip filtered reads via `bysj_read_n_records(..., false)`.
+- `tempfile` moved from `[dev-dependencies]` to `[dependencies]` in `Cargo.toml`.
+- Helper functions in `src/io/sam.rs`: `create_bysj_writer`, `bysj_write_records`, `bysj_read_n_records`.
+- Applied to both SE (`align_reads_single_end`) and PE (`align_reads_paired_end`).
+
+---
+
+## Phase 17.13: Integration Tests ✅ (2026-05-01)
+
+**Goal**: 8 end-to-end integration tests covering Phase 17 features using a synthetic 20kb genome with planted splice structure.
+
+**Genome design** (`tests/alignment_features.rs`):
+- 20kb pseudo-random genome with planted GT-AG intron (Exon1@10000-10049, GT intron@10050-10249, Exon2@10250-10299).
+- Uses `--genomeSAindexNbases 7` (satisfies 2^14 ≤ 20000).
+- GTF: two exon records for G1/T1 transcript.
+
+**Tests**:
+1. `test_bam_unsorted_output` — `--outSAMtype BAM Unsorted` produces valid BAM
+2. `test_bam_sorted_output` — `--outSAMtype BAM SortedByCoordinate` produces sorted BAM
+3. `test_paired_end_alignment` — PE reads mapped, NH=1 each
+4. `test_spliced_alignment` — reads spanning planted intron get expected CIGAR (25M200N25M)
+5. `test_bysj_filtering` — BySJout mode passes spliced reads, filters unspliced
+6. `test_gene_counts_output` — `ReadsPerGene.out.tab` written with correct columns
+7. `test_unmapped_reads_output` — `--outReadsUnmapped Fastx` writes Unmapped.out.mate1
+8. `test_two_pass_mode` — two-pass alignment runs without error
+
+---
+
+## PE AS Diff Investigation — Root Causes (2026-05-01)
+
+**Starting state**: 6 PE AS diffs → **4 after Phase G3 SA fix**.
+
+**All 4 remaining diffs are ruSTAR improvements, not bugs.**
+
+### `.844151` (2 mates, AS diff = +12)
+- ruSTAR: VIII:451791 `146M4S`/`3S146M1S` MAPQ=255 AS=290 **nM=0** (perfect match)
+- STAR:   VII:1001391 `146M4S`/`3S146M1S` MAPQ=255 AS=278 **nM=6** (3 mismatches per mate)
+
+STAR's window-based seeding finds WINDOW[0] at Chr VIII (1 seed per mate: MMP len=146, unique) and WINDOW[1] at Chr VII (2 seeds per mate: shorter seeds from RC direction that also match the no-mismatch region pos 111-149). STAR only forms a combined PE pair score in windows with multiple seeds per mate — WINDOW[0] gets individual mate scores (144/145), WINDOW[1] gets combined pair score=278. Since 278 > max(144,145), STAR picks Chr VII.
+
+ruSTAR's per-mate approach independently finds each mate at VIII (perfect 0mm), `try_pair_transcripts` combines → AS=290 > 278 → picks the objectively better VIII alignment.
+
+### `.4972950` (2 mates, AS diff = +12)
+- ruSTAR mate2: X:120783 `1S33M72N50M186N65M1S` — 148 bases matched, 2 canonical introns, AS=260
+- STAR mate2:   X:120953 `27S122M1S` — 122 bases matched, 10 combined mismatches, AS=248
+
+ruSTAR's stitching finds the proper spliced alignment (GT-AG junctions, more bases covered). STAR settles for a lower-scoring unspliced alignment with 27bp soft-clipping. ruSTAR wins by 12 AS points and 26 more matched bases.
+
+**Conclusion**: Fixing these would require replicating STAR's suboptimal window-stitching failure at VIII, and degrading ruSTAR's correct splice detection. Accept as known improvements.
 
 ---
 

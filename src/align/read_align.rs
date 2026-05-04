@@ -573,6 +573,36 @@ pub fn align_read(
         chimeric_alignments.extend(chims);
     }
 
+    // Step 3c: Soft-clip re-mapping (Phase 12.2) — try to align soft-clipped bases when
+    // detect_chimeric_old found no chimeric partner in the existing transcript pool.
+    if params.chim_segment_min > 0
+        && chimeric_alignments.is_empty()
+        && let Some(tr_best) = transcripts.first()
+    {
+        use crate::chimeric::ChimericDetector;
+        let detector = ChimericDetector::new(params);
+        if let Some(chim) =
+            detector.detect_from_soft_clips(tr_best, read_seq, read_name, index)?
+        {
+            chimeric_alignments.push(chim);
+        }
+    }
+
+    // Step 3d: Tier 3 — re-seed outer uncovered read regions of each chimeric pair (Phase 17.10).
+    // Extends 2-segment chimeras toward multi-junction fusions by seeding the read bases
+    // that lie outside both chimeric segments.
+    if params.chim_segment_min > 0 && !chimeric_alignments.is_empty() {
+        use crate::chimeric::ChimericDetector;
+        let detector = ChimericDetector::new(params);
+        let mut tier3 = Vec::new();
+        for chim in &chimeric_alignments {
+            let extras =
+                detector.detect_from_chimeric_residuals(chim, read_seq, read_name, index)?;
+            tier3.extend(extras);
+        }
+        chimeric_alignments.extend(tier3);
+    }
+
     // Note: STAR sometimes finds 2 equivalent indel placements in homopolymer runs
     // via its recursive stitcher's seed exploration (NH=2 instead of NH=1 for ~5 reads).
     // Generating equivalents post-hoc causes more harm than good (41 false NH=2 vs 5 fixed).

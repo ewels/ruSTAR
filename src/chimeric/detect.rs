@@ -1,7 +1,9 @@
 // Chimeric alignment detection algorithms
 
 use crate::align::SeedCluster;
-use crate::align::stitch::stitch_seeds;
+use crate::align::score::AlignmentScorer;
+use crate::align::seed::Seed;
+use crate::align::stitch::{cluster_seeds, stitch_seeds, stitch_seeds_with_jdb};
 use crate::align::transcript::Transcript;
 use crate::chimeric::score::{calculate_repeat_length, classify_junction_type};
 use crate::chimeric::segment::{ChimericAlignment, ChimericSegment};
@@ -20,18 +22,357 @@ impl<'a> ChimericDetector<'a> {
         Self { params }
     }
 
-    /// Detect chimeric alignments from soft-clipped transcripts (Tier 1 — stub, replaced by detect_chimeric_old)
+    /// Detect chimeric alignments by re-seeding soft-clipped bases (Tier 1 soft-clip re-mapping).
     ///
-    /// This stub is kept for API compatibility but returns None; chimericDetectionOld handles this case.
-    #[allow(dead_code)]
+    /// When the primary alignment has a large soft-clip (>= chimSegmentMin), extract that
+    /// clipped sequence and run a new seed search.  If a valid alignment is found it is paired
+    /// with the primary transcript to form a chimeric alignment.  Right clips are tried first,
+    /// then left clips.  This complements `detect_chimeric_old`, which only searches transcripts
+    /// already found during normal seeding.
     pub fn detect_from_soft_clips(
         &self,
-        _transcript: &Transcript,
-        _read_seq: &[u8],
-        _read_name: &str,
-        _index: &GenomeIndex,
+        transcript: &Transcript,
+        read_seq: &[u8],
+        read_name: &str,
+        index: &GenomeIndex,
     ) -> Result<Option<ChimericAlignment>, Error> {
+        let params = self.params;
+        let min_seg = params.chim_segment_min as usize;
+        if min_seg == 0 || transcript.exons.is_empty() {
+            return Ok(None);
+        }
+
+        let read_len = read_seq.len();
+        let (left_clip, right_clip) = transcript.count_soft_clips();
+        let score_min = params.chim_score_min;
+        let score_drop_max = params.chim_score_drop_max;
+        let non_gtag_penalty = params.chim_score_junction_non_gtag;
+        let intron_max = params.align_intron_max as u64;
+        let overhang_min = params.chim_junction_overhang_min as usize;
+
+        // Try right clip first, then left (match STAR's ordering)
+        let candidates = [
+            (right_clip as usize, true),
+            (left_clip as usize, false),
+        ];
+
+        for (clip_len, is_right) in candidates {
+            if clip_len < min_seg {
+                continue;
+            }
+
+            let clip_start = if is_right { read_len - clip_len } else { 0 };
+            let clip_seq = if is_right {
+                &read_seq[clip_start..]
+            } else {
+                &read_seq[..clip_len]
+            };
+
+            // Re-seed the soft-clipped sub-sequence
+            let seeds = Seed::find_seeds(clip_seq, index, params.seed_map_min, params, "")?;
+            if seeds.is_empty() {
+                continue;
+            }
+
+            let clusters = cluster_seeds(&seeds, index, params, clip_seq.len(), false);
+            if clusters.is_empty() {
+                continue;
+            }
+
+            let scorer = AlignmentScorer::from_params(params);
+            let jdb = if index.junction_db.is_empty() {
+                None
+            } else {
+                Some(&index.junction_db)
+            };
+            let clip_trs = stitch_seeds_with_jdb(&clusters[0], clip_seq, index, &scorer, jdb, 1)?;
+
+            let Some(clip_tr_raw) = clip_trs.into_iter().next() else {
+                continue;
+            };
+
+            if clip_tr_raw.exons.is_empty() {
+                continue;
+            }
+
+            let clip_aligned =
+                clip_tr_raw.exons.last().unwrap().read_end - clip_tr_raw.exons[0].read_start;
+            if clip_aligned < min_seg {
+                continue;
+            }
+
+            // Shift sub-seq read coords into full-read space for right clips
+            let clip_tr = if is_right {
+                adjust_read_positions(clip_tr_raw, clip_start)
+            } else {
+                clip_tr_raw
+            };
+
+            // Determine donor / acceptor by read order
+            let primary_rs = transcript.exons[0].read_start;
+            let clip_rs = clip_tr.exons[0].read_start;
+            let (tr_donor, tr_acceptor): (&Transcript, &Transcript) =
+                if primary_rs <= clip_rs {
+                    (transcript, &clip_tr)
+                } else {
+                    (&clip_tr, transcript)
+                };
+
+            // Overhang: each segment must cover >= chimJunctionOverhangMin at junction boundary
+            let donor_overhang =
+                tr_donor.exons.last().unwrap().read_end - tr_donor.exons[0].read_start;
+            let acceptor_overhang =
+                tr_acceptor.exons.last().unwrap().read_end - tr_acceptor.exons[0].read_start;
+            if donor_overhang < overhang_min || acceptor_overhang < overhang_min {
+                continue;
+            }
+
+            // Classify junction for score adjustment
+            let junction_type = classify_junction_type(
+                &index.genome,
+                tr_donor.chr_idx,
+                tr_donor.genome_end,
+                tr_donor.is_reverse,
+                tr_acceptor.chr_idx,
+                tr_acceptor.genome_start,
+                tr_acceptor.is_reverse,
+            );
+
+            let combined_score = tr_donor.score + tr_acceptor.score;
+            let effective_score = if junction_type == 0 {
+                combined_score + non_gtag_penalty
+            } else {
+                combined_score
+            };
+
+            if effective_score < score_min {
+                continue;
+            }
+            if effective_score + score_drop_max < read_len as i32 {
+                continue;
+            }
+
+            // Must be geometrically chimeric (different chr/strand, or span > alignIntronMax)
+            let is_chimeric = tr_donor.chr_idx != tr_acceptor.chr_idx
+                || tr_donor.is_reverse != tr_acceptor.is_reverse
+                || {
+                    let span = if tr_donor.genome_end <= tr_acceptor.genome_start {
+                        tr_acceptor.genome_start - tr_donor.genome_end
+                    } else {
+                        tr_donor.genome_start.saturating_sub(tr_acceptor.genome_end)
+                    };
+                    intron_max > 0 && span > intron_max
+                };
+
+            if !is_chimeric {
+                continue;
+            }
+
+            let donor_seg = transcript_to_segment(tr_donor)
+                .map_err(|e| Error::Chimeric(format!("soft-clip donor: {}", e)))?;
+            let acceptor_seg = transcript_to_segment(tr_acceptor)
+                .map_err(|e| Error::Chimeric(format!("soft-clip acceptor: {}", e)))?;
+
+            let (repeat_len_donor, repeat_len_acceptor) = calculate_repeat_length(
+                &index.genome,
+                donor_seg.chr_idx,
+                donor_seg.genome_end,
+                acceptor_seg.chr_idx,
+                acceptor_seg.genome_start,
+                20,
+            );
+
+            let chim = ChimericAlignment::new(
+                donor_seg,
+                acceptor_seg,
+                junction_type,
+                repeat_len_donor,
+                repeat_len_acceptor,
+                read_seq.to_vec(),
+                read_name.to_string(),
+            );
+
+            return Ok(Some(chim));
+        }
+
         Ok(None)
+    }
+
+    /// Re-seed the outer uncovered read regions of an existing chimeric pair (Tier 3).
+    ///
+    /// After Tiers 1 and 2 find a donor+acceptor chimeric alignment, the read may still
+    /// have uncovered bases at the left of the donor or the right of the acceptor.  If
+    /// either uncovered span is >= chimSegmentMin, re-seed it and attempt to form an
+    /// additional chimeric alignment with the adjacent segment.  This enables detection
+    /// of multi-junction chimeric reads (3-way gene fusions).
+    pub fn detect_from_chimeric_residuals(
+        &self,
+        chim: &ChimericAlignment,
+        read_seq: &[u8],
+        read_name: &str,
+        index: &GenomeIndex,
+    ) -> Result<Vec<ChimericAlignment>, Error> {
+        let params = self.params;
+        let min_seg = params.chim_segment_min as usize;
+        if min_seg == 0 {
+            return Ok(vec![]);
+        }
+
+        let read_len = read_seq.len();
+        let score_min = params.chim_score_min;
+        let score_drop_max = params.chim_score_drop_max;
+        let non_gtag_penalty = params.chim_score_junction_non_gtag;
+        let intron_max = params.align_intron_max as u64;
+        let overhang_min = params.chim_junction_overhang_min as usize;
+
+        // Outer boundaries of the existing chimeric pair in read space
+        let left_covered = chim.donor.read_start.min(chim.acceptor.read_start);
+        let right_covered = chim.donor.read_end.max(chim.acceptor.read_end);
+
+        // Which segment is at the left / right boundary
+        let left_partner = if chim.donor.read_start <= chim.acceptor.read_start {
+            &chim.donor
+        } else {
+            &chim.acceptor
+        };
+        let right_partner = if chim.donor.read_end >= chim.acceptor.read_end {
+            &chim.donor
+        } else {
+            &chim.acceptor
+        };
+
+        // [clip_start, clip_end) → partner it would be paired with
+        let candidates = [
+            (0usize, left_covered, left_partner),
+            (right_covered, read_len, right_partner),
+        ];
+
+        let mut results = Vec::new();
+
+        for (clip_start, clip_end, partner_seg) in candidates {
+            let clip_len = clip_end - clip_start;
+            if clip_len < min_seg {
+                continue;
+            }
+
+            let clip_seq = &read_seq[clip_start..clip_end];
+
+            let seeds = Seed::find_seeds(clip_seq, index, params.seed_map_min, params, "")?;
+            if seeds.is_empty() {
+                continue;
+            }
+
+            let clusters = cluster_seeds(&seeds, index, params, clip_seq.len(), false);
+            if clusters.is_empty() {
+                continue;
+            }
+
+            let scorer = AlignmentScorer::from_params(params);
+            let jdb = if index.junction_db.is_empty() {
+                None
+            } else {
+                Some(&index.junction_db)
+            };
+            let clip_trs =
+                stitch_seeds_with_jdb(&clusters[0], clip_seq, index, &scorer, jdb, 1)?;
+
+            let Some(clip_tr_raw) = clip_trs.into_iter().next() else {
+                continue;
+            };
+            if clip_tr_raw.exons.is_empty() {
+                continue;
+            }
+
+            let clip_aligned =
+                clip_tr_raw.exons.last().unwrap().read_end - clip_tr_raw.exons[0].read_start;
+            if clip_aligned < min_seg {
+                continue;
+            }
+
+            // Shift sub-seq read coords into full-read space
+            let clip_tr = if clip_start > 0 {
+                adjust_read_positions(clip_tr_raw, clip_start)
+            } else {
+                clip_tr_raw
+            };
+
+            let new_seg = transcript_to_segment(&clip_tr)
+                .map_err(|e| Error::Chimeric(format!("tier3 segment: {}", e)))?;
+
+            // Donor / acceptor ordered by read position
+            let (donor_seg, acceptor_seg): (&ChimericSegment, &ChimericSegment) =
+                if new_seg.read_start <= partner_seg.read_start {
+                    (&new_seg, partner_seg)
+                } else {
+                    (partner_seg, &new_seg)
+                };
+
+            // Overhang check
+            let donor_overhang = donor_seg.read_end - donor_seg.read_start;
+            let acceptor_overhang = acceptor_seg.read_end - acceptor_seg.read_start;
+            if donor_overhang < overhang_min || acceptor_overhang < overhang_min {
+                continue;
+            }
+
+            // Junction classification and score
+            let junction_type = classify_junction_type(
+                &index.genome,
+                donor_seg.chr_idx,
+                donor_seg.genome_end,
+                donor_seg.is_reverse,
+                acceptor_seg.chr_idx,
+                acceptor_seg.genome_start,
+                acceptor_seg.is_reverse,
+            );
+
+            let combined_score = donor_seg.score + acceptor_seg.score;
+            let effective_score = if junction_type == 0 {
+                combined_score + non_gtag_penalty
+            } else {
+                combined_score
+            };
+
+            if effective_score < score_min || effective_score + score_drop_max < read_len as i32 {
+                continue;
+            }
+
+            // Geometry check: must be genuinely chimeric
+            let is_chimeric = donor_seg.chr_idx != acceptor_seg.chr_idx
+                || donor_seg.is_reverse != acceptor_seg.is_reverse
+                || {
+                    let span = if donor_seg.genome_end <= acceptor_seg.genome_start {
+                        acceptor_seg.genome_start - donor_seg.genome_end
+                    } else {
+                        donor_seg.genome_start.saturating_sub(acceptor_seg.genome_end)
+                    };
+                    intron_max > 0 && span > intron_max
+                };
+
+            if !is_chimeric {
+                continue;
+            }
+
+            let (repeat_len_donor, repeat_len_acceptor) = calculate_repeat_length(
+                &index.genome,
+                donor_seg.chr_idx,
+                donor_seg.genome_end,
+                acceptor_seg.chr_idx,
+                acceptor_seg.genome_start,
+                20,
+            );
+
+            results.push(ChimericAlignment::new(
+                donor_seg.clone(),
+                acceptor_seg.clone(),
+                junction_type,
+                repeat_len_donor,
+                repeat_len_acceptor,
+                read_seq.to_vec(),
+                read_name.to_string(),
+            ));
+        }
+
+        Ok(results)
     }
 
     /// Detect chimeric alignments from multi-cluster seeds (Tier 2)
@@ -271,6 +612,18 @@ pub fn detect_inter_mate_chimeric(
     );
 
     Some(chim)
+}
+
+/// Shift all exon read_start/read_end values in a transcript by `offset`.
+///
+/// Used when a transcript was stitched against a sub-slice of the read (e.g. a right soft-clip
+/// at position `offset`) so that its read coordinates become relative to the full read.
+fn adjust_read_positions(mut tr: Transcript, offset: usize) -> Transcript {
+    for exon in &mut tr.exons {
+        exon.read_start += offset;
+        exon.read_end += offset;
+    }
+    tr
 }
 
 /// Compute read-orientation (5'→3' of original read) start/end for a transcript.
